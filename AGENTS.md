@@ -178,6 +178,60 @@ Additional tensor/layout rules for this codebase:
 * `ggml_n_dims` / `ggml_n_dims(tensor)` can drop trailing singleton high
   dimensions. Do not assume a logical trailing dimension of `1` will still be
   counted in ggml metadata.
+
+---
+
+## FA-RDNA2 Port (RX 6800, active project)
+
+Port the self-written Metal flash-attention kernels (FA-RDNA2, proven in
+`engines/text/llama.cpp-metal-exact` on branch `metal-exact-alloc`) into this
+tree's vendored `ggml/`, so diffusion attention stops falling back to the
+manual matmul+softmax path on AMD dGPUs without `simdgroup_mm`.
+
+The user explicitly requested this port; `ggml/` modification is authorized
+for it and nothing else. Do not push or commit without an explicit request.
+
+### Why
+
+`src/core/ggml_extend.cpp:build_kqv` casts K/V to F16 and calls
+`ggml_flash_attn_ext`, but `ggml/src/ggml-metal/ggml-metal-device.m` answers
+`supports_op` with `has_simdgroup_mm` (false on RX 6800), so
+`ggml_backend_supports_op` fails and attention runs the slow manual path.
+MiniMax-H3 DiT (50 layers, 56 heads x dk128, F16 KV, no mask, long video
+sequences) is the prime target: it matches the fastest ported kernel
+(`tile_dk128`).
+
+### Machine constraints (RX 6800 is display + compute, 16GB)
+
+* Before any GPU/memory-heavy run, check occupancy first: `vm_stat`, and
+  `ps aux | grep -E "llama|python|sd|cli" | grep -v grep`. A foreign process
+  holding memory/VRAM means stop and ask, never kill, never run through.
+* Keep total VRAM (weights + KV/compute + 1GB for WindowServer/compositor)
+  under 15GB. Watchdog kills (display loss + fake-dead network) follow
+  otherwise. Stop servers/runs when done; do not leave the display GPU
+  saturated.
+* This tree's FA gate defaults to OFF (`GGML_METAL_FA_AMD=1` to enable).
+  Keep it opt-in.
+
+### Phases and gates
+
+* P0 - port: embed `fa_amd.metal` kernels (vec/reduce/tile dk64/128/256;
+  dk512 needs an NBC=32 tile variant, H3 does not need it), add
+  `amd_supported`/`amd_quant_supported` gates + dispatch at the top of
+  `ggml_metal_op_flash_attn_ext`, hook `supports_op` for the no-simdgroup-mm
+  case. H3 (F32 Q, F16 KV, no mask/sinks) must pass every gate.
+* P1 - correctness: FA path taken (pipeline compile log shows
+  `tile_dk128`/`vec_dk128`), then seed-fixed generation output parity
+  pre/post port. Any NaN/blank output means stop (see the mask-shape lesson
+  documented in `src/core/ggml_extend.cpp`).
+* P2 - speed: same prompt/steps before/after on the same machine state.
+* Later (separate approval): MMQ blocked `mul_mm` for Q4_K DiT linears.
+
+### Explicitly out of scope
+
+* kvmem slot-pool, SWA split, KQ-mask shortcut, segmented mmap: this tree
+  has no KV-cache/memory subsystem and mmaps weights to a CPU buffer, so
+  none of them apply.
 * Internal tensor-returning interfaces use an empty `sd::Tensor` to represent
   null, absent, or failure states. Do not add `std::optional<sd::Tensor<...>>`
   for internal APIs unless a distinct semantic state is truly required.
