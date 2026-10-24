@@ -98,7 +98,7 @@ documentation.
 
 ### External, Local, and Generated State
 
-* `ggml/` - git submodule for the ggml dependency.
+* `ggml/` - vendored ggml (in-tree since 2026-10-24, from leejet/ggml + FA-RDNA2 port; was a submodule).
 * `thirdparty/` - vendored third-party dependencies.
 * `models/` - local model storage. Ignore this directory and do not read model
   files.
