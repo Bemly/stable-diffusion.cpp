@@ -210,8 +210,8 @@ sequences) is the prime target: it matches the fastest ported kernel
   under 15GB. Watchdog kills (display loss + fake-dead network) follow
   otherwise. Stop servers/runs when done; do not leave the display GPU
   saturated.
-* This tree's FA gate defaults to OFF (`GGML_METAL_FA_AMD=1` to enable).
-  Keep it opt-in.
+* This tree's FA gate defaults to ON (`GGML_METAL_FA_AMD=0` opts out), same
+  as llama.cpp-spec and audio.cpp; the user asked for default-on on 2026-10-24.
 
 ### Phases and gates
 
