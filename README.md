@@ -15,6 +15,9 @@ API and command-line option may change frequently.***
 
 ## 🔥Important News
 
+* **2026/10/16** 🚀 stable-diffusion.cpp adds **Day-0 support for MOSS-Image-Base / MOSS-Image-SFT**
+* **2026/10/16** 🚀 stable-diffusion.cpp adds **Day-0 support for FLUX.3 Image Klein / Klein Base**
+* **2026/09/20** 🚀 stable-diffusion.cpp adds **Day-0 support for Qwen-Image-2.1**
 * **2026/08/20** 🚀 stable-diffusion.cpp now supports **LTX-2.5**
 * **2026/08/04** 🚀 stable-diffusion.cpp adds **Day-1 support for MiniMax-H3**
 * **2026/06/25** 🚀 stable-diffusion.cpp now supports **Krea2**
@@ -43,14 +46,20 @@ API and command-line option may change frequently.***
     - [SD3/SD3.5](./docs/sd3.md)
     - [FLUX.1-dev/FLUX.1-schnell](./docs/flux.md)
     - [FLUX.2-dev/FLUX.2-klein](./docs/flux2.md)
+    - [FLUX.3 Image Klein / Klein Base](./docs/flux3.md)
+    - [MOSS-Image-Base / MOSS-Image-SFT](./docs/moss_image.md)
+    - [Fibo 2.0 Dev](./docs/fibo2.md)
     - [Lens](./docs/lens.md)
     - [Chroma](./docs/chroma.md)
     - [Chroma1-Radiance](./docs/chroma_radiance.md)
     - [Qwen Image](./docs/qwen_image.md)
+    - [Qwen Image 2.1](./docs/qwen_image_2.1.md)
     - [PiD](./docs/pid.md)
     - [LongCat Image](./docs/longcat_image.md)
     - [Z-Image](./docs/z_image.md)
+    - [Z-Image L2P](./docs/z_image_l2p.md)
     - [MiniT2I](./docs/minit2i.md)
+    - [P-H3-Image](./docs/p_h3_image.md)
     - [SenseNova U1.5](./docs/sensenova_u1.md)
     - [Ovis-Image](./docs/ovis_image.md)
     - [Anima](./docs/anima.md)
@@ -61,18 +70,27 @@ API and command-line option may change frequently.***
     - [SeFi-Image](./docs/sefi_image.md)
     - [HiDream-O1-Image](./docs/hidream_o1_image.md)
     - [Ideogram4](./docs/ideogram4.md)
+    - [LLaDA-Image](./docs/llada_image.md)
+    - [Ming-Image Design](./docs/ming_image.md)
+    - [PixArt](./docs/pixart.md)
+    - [Iris-3B](./docs/iris.md)
   - [Image Edit Models](./docs/edit.md)
     - [FLUX.1-Kontext-dev](./docs/kontext.md)
     - [Qwen Image Edit series](./docs/qwen_image_edit.md)
     - [LongCat Image Edit](./docs/longcat_image.md)
     - [Boogu Image Edit](./docs/boogu_image.md)
     - [Mage-Flow-Edit](./docs/mage_flow.md#image-editing)
+    - [LLaDA-Image Edit](./docs/llada_image.md#image-editing)
+    - [Fibo 2.0 Dev / Edit Turbo](./docs/fibo2.md#editing-and-turbo)
   - Video Models
     - [Wan2.1/Wan2.2](./docs/wan.md)
     - [MiniMax-H3](./docs/minimax_h3.md)
     - [LTX-2.3/LTX-2.5](./docs/ltx2.md)
     - [HunyuanVideo 1.5](./docs/hunyuan_video.md)
     - [LingBot-Video](./docs/lingbot_video.md)
+  - Video Upscale Models
+    - [RelayVSR](./docs/relay_vsr.md)
+    - [SeedVR2](./docs/seedvr2.md)
   - [PhotoMaker](./docs/photo_maker.md) support.
   - [IP-Adapter](./docs/ip_adapter.md) support (SD 1.5 and SDXL, including Plus)
   - Control Net support with SD 1.5
@@ -175,7 +193,6 @@ These projects wrap `stable-diffusion.cpp` for easier use in other languages/fra
 These projects use `stable-diffusion.cpp` as a backend for their image generation.
 
 - [GIMP Plugins](https://github.com/themanyone/gimp-plugins)
-- [Jellybox](https://jellybox.com)
 - [Stable Diffusion GUI](https://github.com/fszontagh/sd.cpp.gui.wx)
 - [Stable Diffusion CLI-GUI](https://github.com/piallai/stable-diffusion.cpp)
 - [Local Diffusion](https://github.com/rmatif/Local-Diffusion)
@@ -183,6 +200,10 @@ These projects use `stable-diffusion.cpp` as a backend for their image generatio
 - [LocalAI](https://github.com/mudler/LocalAI)
 - [Neural-Pixel](https://github.com/Luiz-Alcantara/Neural-Pixel)
 - [KoboldCpp](https://github.com/LostRuins/koboldcpp)
+- [Kokon](https://github.com/GabrieleLozupone/kokon)
+- [NodeTool](https://github.com/nodetool-ai/nodetool)
+- [Quo](https://github.com/quo-ai/quo)
+- [Prisme](https://github.com/d3Ita/prisme)
 
 ## Contributors
 

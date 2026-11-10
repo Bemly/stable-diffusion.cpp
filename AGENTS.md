@@ -83,6 +83,8 @@ documentation.
   and debugging.
 * `examples/common/` - shared example support code.
 * `examples/server/` - server application built on top of the library.
+  Before modifying built-in recipes, read and follow
+  [the built-in recipe policy](examples/server/recipes/README.md).
 * `examples/server/frontend/` - git submodule containing independent frontend
   code. Avoid modifying it unless explicitly requested.
 
@@ -98,7 +100,7 @@ documentation.
 
 ### External, Local, and Generated State
 
-* `ggml/` - vendored ggml (in-tree since 2026-10-24, from leejet/ggml + FA-RDNA2 port; was a submodule).
+* `ggml/` - git submodule for the ggml dependency.
 * `thirdparty/` - vendored third-party dependencies.
 * `models/` - local model storage. Ignore this directory and do not read model
   files.
@@ -118,7 +120,8 @@ documentation.
 6. Run the narrowest useful build, test, or inspection command available.
 
 Follow `CONTRIBUTING.md` for formatting, naming, PR expectations, dependency
-update policy, and security rules.
+update policy, and security rules. For tokenizer additions, follow its embedded-data
+allowlist and default to an external `tokenizer.json`.
 
 ---
 
@@ -178,13 +181,16 @@ Additional tensor/layout rules for this codebase:
 * `ggml_n_dims` / `ggml_n_dims(tensor)` can drop trailing singleton high
   dimensions. Do not assume a logical trailing dimension of `1` will still be
   counted in ggml metadata.
+* Internal tensor-returning interfaces use an empty `sd::Tensor` to represent
+  null, absent, or failure states. Do not add `std::optional<sd::Tensor<...>>`
+  for internal APIs unless a distinct semantic state is truly required.
 
 ---
 
 ## FA-RDNA2 Port (RX 6800, active project)
 
 Port the self-written Metal flash-attention kernels (FA-RDNA2, proven in
-`engines/text/llama.cpp-metal-exact` on branch `metal-exact-alloc`) into this
+`engines/text/llama.cpp-spec` on branch `spec`) into this
 tree's vendored `ggml/`, so diffusion attention stops falling back to the
 manual matmul+softmax path on AMD dGPUs without `simdgroup_mm`.
 

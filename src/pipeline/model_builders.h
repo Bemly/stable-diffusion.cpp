@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 
+#include "core/ggml_extend_backend.h"
 #include "model.h"
 #include "stable-diffusion.h"
 
@@ -15,6 +16,9 @@ struct DiffusionModelRunner;
 struct VAE;
 struct AudioVAERunner;
 struct ControlNet;
+namespace Wav2Vec2 {
+    class Wav2Vec2ModelRunner;
+}
 struct GenerationExtension;
 struct GenerationExtensionInitContext;
 namespace IPAdapter {
@@ -37,6 +41,7 @@ namespace sd::model_builders {
         std::shared_ptr<DiffusionModelRunner> high_noise_diffusion;
         std::shared_ptr<FrozenCLIPVisionEmbedder> clip_vision;
         std::shared_ptr<IPAdapter::IPAdapterRunner> ip_adapter;
+        std::shared_ptr<Wav2Vec2::Wav2Vec2ModelRunner> audio_encoder;
     };
 
     struct VAEOptions {
@@ -51,6 +56,8 @@ namespace sd::model_builders {
         std::shared_ptr<VAE> preview;
         std::shared_ptr<AudioVAERunner> audio;
     };
+
+    bool ensure_backend_pair(SDBackendManager& backends, SDBackendModule module);
 
     bool build_core_runners(const Context& ctx, CoreRunners& runners);
     bool build_vae_runners(const Context& ctx, const VAEOptions& options, VAERunners& runners);

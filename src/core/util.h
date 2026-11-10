@@ -29,6 +29,7 @@ bool contains(const std::string& str, const std::string& substr);
 std::string sd_format(const char* fmt, ...);
 
 void replace_all_chars(std::string& str, char target, char replacement);
+std::string escape_newlines(const std::string& text);
 
 int round_up_to(int value, int base);
 
@@ -90,6 +91,7 @@ void log_printf(sd_log_level_t level, const char* file, int line, const char* fo
 void sd_ggml_log_callback(ggml_log_level level, const char* text, void*);
 
 ggml_type sd_type_to_ggml_type(sd_type_t sdtype);
+bool validate_tensor_types(sd_type_t type, const char* tensor_type_rules);
 
 std::string trim(const std::string& s);
 
@@ -100,6 +102,7 @@ std::vector<std::pair<std::string, float>> split_quotation_attention(
 sd_progress_cb_t sd_get_progress_callback();
 void* sd_get_progress_callback_data();
 
+void sd_begin_preview_pass(int total_steps);
 sd_preview_cb_t sd_get_preview_callback();
 void* sd_get_preview_callback_data();
 preview_t sd_get_preview_mode();

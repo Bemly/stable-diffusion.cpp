@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <ostream>
 #include <string>
@@ -19,7 +20,7 @@ static void set_error(std::string* error, const std::string& message) {
 }
 
 bool is_gguf_file(const std::string& file_path) {
-    std::ifstream file(file_path, std::ios::binary);
+    std::ifstream file(std::filesystem::u8path(file_path), std::ios::binary);
     if (!file.is_open()) {
         return false;
     }
@@ -47,16 +48,32 @@ bool read_gguf_file(const std::string& file_path,
     gguf_context* ctx_gguf_ = nullptr;
     ggml_context* ctx_meta_ = nullptr;
 
-    ctx_gguf_ = gguf_init_from_file(file_path.c_str(), {true, &ctx_meta_});
+    GGUFReader gguf_reader;
+    bool probe_ok = gguf_reader.load(file_path);
+
+    if (!probe_ok || !gguf_reader.has_tensors_beyond_ggml_limits()) {
+        ctx_gguf_ = gguf_init_from_file(file_path.c_str(), {true, &ctx_meta_});
+    }
     if (!ctx_gguf_) {
-        GGUFReader gguf_reader;
-        if (!gguf_reader.load(file_path)) {
+        if (!probe_ok && !gguf_reader.load(file_path)) {
             set_error(error, "failed to open '" + file_path + "' with GGUFReader");
             return false;
         }
 
         size_t data_offset = gguf_reader.data_offset();
         for (const auto& gguf_tensor_info : gguf_reader.tensors()) {
+#ifdef SD_USE_UPSTREAM_GGML
+            if (static_cast<int>(gguf_tensor_info.type) == SD_TYPE_F8_E4M3 ||
+                static_cast<int>(gguf_tensor_info.type) == SD_TYPE_F8_E5M2) {
+                set_error(error, "FP8 is not supported by this ggml build (tensor '" + gguf_tensor_info.name + "')");
+                return false;
+            }
+#endif
+            if (static_cast<unsigned>(gguf_tensor_info.type) >= GGML_TYPE_COUNT ||
+                ggml_get_type_traits(gguf_tensor_info.type)->type_size == 0) {
+                set_error(error, "unsupported GGUF tensor type (tensor '" + gguf_tensor_info.name + "')");
+                return false;
+            }
             TensorStorage tensor_storage(
                 gguf_tensor_info.name,
                 gguf_tensor_info.type,
@@ -162,7 +179,7 @@ bool GGUFStreamingWriter::write_metadata(const std::string& file_path,
     }
 
     LOG_INFO("trying to save tensors to %s", file_path.c_str());
-    FILE* file = fopen(file_path.c_str(), "wb+");
+    FILE* file = ggml_fopen(file_path.c_str(), "wb+");
     if (file == nullptr) {
         set_error(error, "failed to open output file '" + file_path + "'");
         close();

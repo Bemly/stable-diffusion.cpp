@@ -7,13 +7,18 @@
 
 #include "core/ggml_runner.h"
 #include "core/tensor_ggml.hpp"
-#include "model/common/rope.hpp"
+#include "model/common/rope_circular.hpp"
 #include "model_manager.h"
 
 enum class RefImageResizeMode {
     NONE,
     LONGEST_SIDE,
     AREA,
+};
+
+enum class RefImageSizeMode {
+    MATCH,
+    MAX,
 };
 
 struct RefImageParams {
@@ -27,9 +32,26 @@ struct RefImageParams {
     int vlm_min_size                   = -1;
     int vlm_max_size                   = -1;
     bool resize_vae_to_target          = false;
+    bool resize_single_ref_to_target   = false;
+    bool vae_size_buckets              = false;
+    bool vae_center_crop               = false;
+    bool vlm_use_vae_input             = false;
+    RefImageSizeMode ref_image_size    = RefImageSizeMode::MATCH;
 };
 
 const std::unordered_map<std::string, RefImageParams> REF_IMAGE_PRESETS = {
+    {"fibo2", [] {
+         RefImageParams params;
+         params.pass_to_vlm                 = true;
+         params.ref_index_mode              = Rope::RefIndexMode::INCREASE;
+         params.vlm_resize_mode             = RefImageResizeMode::LONGEST_SIDE;
+         params.vlm_max_size                = 768;
+         params.resize_single_ref_to_target = true;
+         params.vae_size_buckets            = true;
+         params.vae_center_crop             = true;
+         params.vlm_use_vae_input           = true;
+         return params;
+     }()},
     {"flux_kontext", {false, true, Rope::RefIndexMode::FIXED, false, true, -1, RefImageResizeMode::NONE, -1, -1}},
     {"longcat", {true, true, Rope::RefIndexMode::FIXED, false, true, -1, RefImageResizeMode::AREA, -1, -1}},
     {"flux2", {false, true, Rope::RefIndexMode::INCREASE, false, true, -1, RefImageResizeMode::NONE, -1, -1}},
@@ -39,6 +61,9 @@ const std::unordered_map<std::string, RefImageParams> REF_IMAGE_PRESETS = {
     {"z_image_omni", {true, true, Rope::RefIndexMode::FIXED, false, true, -1, RefImageResizeMode::AREA, -1, -1}},
     {"krea2_ostris_edit", {true, true, Rope::RefIndexMode::INCREASE, true, true, -1, RefImageResizeMode::AREA, -1, -1}},
     {"krea2_edit", {true, true, Rope::RefIndexMode::INCREASE, false, true, -1, RefImageResizeMode::LONGEST_SIDE, 768, 768}},
+    // pass_to_vlm routes the reference image to the conditioner, which is where LLaDA-Image's
+    // SigVQ encoder lives; it does its own half-resolution resize.
+    {"llada_image", {true, true, Rope::RefIndexMode::FIXED, true, true, -1, RefImageResizeMode::NONE, -1, -1, true}},
     {"cosmos_reference", {false, true, Rope::RefIndexMode::INCREASE, false, false, -1, RefImageResizeMode::NONE, -1, -1}},
 };
 
@@ -61,14 +86,26 @@ struct FluxDiffusionExtra {
     float pulid_id_weight               = 1.0f;
 };
 
+struct Flux3DiffusionExtra {
+    const sd::Tensor<float>* target_timestep = nullptr;
+};
+
 struct AnimaDiffusionExtra {
     const sd::Tensor<int32_t>* t5_ids   = nullptr;
     const sd::Tensor<float>* t5_weights = nullptr;
 };
 
+struct QwenImage21DiffusionExtra {
+    const sd::Tensor<int32_t>* image_slots = nullptr;
+    // Nonzero IDs identify immutable prefix inputs within one sampling run.
+    uint64_t prefix_id = 0;
+};
+
 struct WanDiffusionExtra {
     const sd::Tensor<float>* vace_context = nullptr;
     float vace_strength                   = 1.f;
+    // S2V audio, sd::Tensor layout: [dim, T_latent*4, layers].
+    const sd::Tensor<float>* audio_embed = nullptr;
 };
 
 struct HiDreamO1DiffusionExtra {
@@ -108,6 +145,7 @@ struct MiniMaxH3DiffusionExtra {
     int audio_length                                              = 0;
     float video_sigma_shift                                       = 12.f;
     float audio_sigma_shift                                       = 3.f;
+    float video_sigma_next                                        = NAN;
 };
 
 struct MiniT2IDiffusionExtra {
@@ -125,18 +163,37 @@ struct HunyuanVideoDiffusionExtra {
     const sd::Tensor<float>* timestep_r = nullptr;
 };
 
+struct LLaDAImageDiffusionExtra {
+    // SigVQ semantic features of the reference image; present only in editing mode.
+    const sd::Tensor<float>* semantic = nullptr;
+};
+
+struct MingImageDiffusionExtra {
+    const sd::Tensor<float>* direct_context = nullptr;
+};
+
+struct ZImageDiffusionExtra {
+    const sd::Tensor<float>* control_latent = nullptr;
+    float strength                          = 1.f;
+};
+
 using DiffusionExtraParams = std::variant<std::monostate,
                                           UNetDiffusionExtra,
                                           SkipLayerDiffusionExtra,
                                           FluxDiffusionExtra,
+                                          Flux3DiffusionExtra,
                                           AnimaDiffusionExtra,
+                                          QwenImage21DiffusionExtra,
                                           WanDiffusionExtra,
                                           HiDreamO1DiffusionExtra,
                                           LTXAVDiffusionExtra,
                                           MiniMaxH3DiffusionExtra,
                                           MiniT2IDiffusionExtra,
                                           SenseNovaU1DiffusionExtra,
-                                          HunyuanVideoDiffusionExtra>;
+                                          HunyuanVideoDiffusionExtra,
+                                          LLaDAImageDiffusionExtra,
+                                          MingImageDiffusionExtra,
+                                          ZImageDiffusionExtra>;
 
 struct DiffusionParams {
     const sd::Tensor<float>* x                        = nullptr;
@@ -166,6 +223,11 @@ struct DiffusionModelRunner : public GGMLRunner {
 protected:
     std::string prefix;
 
+    std::vector<float> finish_rope_pe(Rope::Embedding embedding) {
+        Rope::apply_circular(embedding, circular_x_enabled, circular_y_enabled);
+        return std::move(embedding.values);
+    }
+
 public:
     DiffusionModelRunner(ggml_backend_t backend,
                          const std::string& prefix,
@@ -175,6 +237,10 @@ public:
 
     virtual sd::Tensor<float> compute(int n_threads,
                                       const DiffusionParams& diffusion_params) = 0;
+
+    virtual int get_patch_size() const {
+        return 1;
+    }
 
     void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors) {
         get_param_tensors(tensors, prefix);

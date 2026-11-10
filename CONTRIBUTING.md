@@ -12,7 +12,13 @@ If you want to update a third-party dependency, please open an issue first inste
 
 ## Pull Requests
 
+When contributing from a fork, use a fork under your personal GitHub account and enable **Allow edits from maintainers**. This lets maintainers make follow-up fixes directly on the PR branch.
+
+PRs from organization-owned forks are automatically closed when opened or reopened because GitHub does not support this maintainer-edit option for those forks. Submit the changes from a personal fork instead. See [GitHub's documentation](https://docs.github.com/en/pull-requests/how-tos/work-with-forks/allowing-changes-to-a-pull-request-branch-created-from-a-fork).
+
 Keep each PR focused on one clear change. Large or overly complex PRs are harder to review and may not be merged.
+
+Do not include test code or test scripts in commits or PRs. Keep them local and report verification results in the PR description.
 
 Follow Conventional Commit-style subjects seen in history: `feat:`, `fix:`, `refactor:`, `ci:`, `docs:`, `chore:`. Keep subjects imperative and scoped.
 
@@ -22,6 +28,33 @@ PRs should include:
 - Verification evidence when applicable (commands and key outputs).
 - Linked issue/PR context when applicable.
 - Screenshots or sample outputs for UI/visual behavior changes.
+
+## Documentation
+
+Write model usage guides in `docs/` for users. Focus on supported weights,
+setup, runnable commands, parameter meanings, output behavior, and practical
+limits such as memory requirements. Include technical details only when they
+help users choose settings or troubleshoot a problem.
+
+Keep tensor layouts, internal class names, kernel implementation details,
+algorithm derivations, and development history out of usage guides. Keep task-specific
+profiling logs, numerical comparison procedures, and test artifacts local, and
+summarize relevant verification results in the PR description.
+
+## README UI Listings
+
+The [UIs list in the README](README.md#uis) only includes open-source projects that use `stable-diffusion.cpp` as a backend. Do not submit PRs to add closed-source UIs.
+
+## Server Recipes
+
+Before adding or changing a built-in server recipe, read and follow the
+[built-in recipe policy](examples/server/recipes/README.md). The policy governs
+native editing, community editing LoRAs, distinct task checkpoints, external
+adapters, native components and layer-count variants. Do not add recipes solely
+for style or acceleration LoRAs, separately stored native components, or added
+or removed model layers. Explain the task, component compatibility or capability
+difference that justifies a new recipe, and verify its required components,
+feature declarations and embedded API representation.
 
 ## Code Style
 
@@ -35,16 +68,30 @@ Naming conventions:
 - In `PascalCase` names, preserve common abbreviations in uppercase, for example `SD`, `API`, `HTTP`, `JSON`, `RGB`, `VAE`, `TAE`, `LoRA`, and `WebP`.
 - Use `snake_case` for functions, methods, variables, and file names unless an existing API requires a different style.
 - Use a trailing underscore for private data member names, for example `hidden_size_` or `tokenizer_`.
-- Use `.h` for C and C++ header files. Do not introduce new `.hpp` headers.
+- Use `.hpp` for model headers under `src/model/`, including new model headers. Do not rename these headers to `.h`. Use `.h` for other C and C++ header files.
 - Use macro-based header include guards instead of `#pragma once`.
 - Format header include guards as `__SD_{PATH}__`, where `{PATH}` is the header path in uppercase snake case without the file extension. For example, `src/sample.h` should use `__SD_SAMPLE_H__`.
 - Do not introduce anonymous namespaces in new or modified code; prefer `static` file-local functions/variables or an explicit named namespace when scoping is needed.
 - In `class`/`struct` definitions, place data members before member functions unless an existing type already clearly follows a different pattern.
-- Keep `test_*.cpp` / `test_*.py` naming for tests.
 
 Some older code in the project may not fully follow the current conventions. Please do not submit PRs that only rewrite existing code to match style rules.
 
 When adding or modifying model implementations, follow the model config and weight detection conventions in [docs/model_config.md](docs/model_config.md).
+
+## Tokenizer Data
+
+New model integrations must use an external `tokenizer.json` by default. Do not
+embed new vocabularies or merge tables solely for less widely used models;
+these tables increase the binary size for every user.
+
+The embedded-data allowlist is CLIP, T5/UMT5, Qwen 2/3, Mistral, and Gemma 3/4.
+Models may reuse an existing embedded tokenizer when its vocabulary and behavior
+match their text encoder. Gemma 2 and GPT-OSS require external JSON files.
+
+Adding to this allowlist requires maintainer approval, supported by the model's
+usage, reuse across models, and measured binary-size cost. Document the matching
+JSON and CLI option for models that require an external tokenizer, and fail
+initialization clearly when it is missing.
 
 ## AI-Assisted Contributions
 

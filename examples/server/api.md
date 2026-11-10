@@ -37,6 +37,7 @@ Current generation-related endpoints include:
 
 - `POST /sdapi/v1/txt2img`
 - `POST /sdapi/v1/img2img`
+- `GET /sdapi/v1/progress`
 - `GET /sdapi/v1/loras`
 - `GET /sdapi/v1/upscalers`
 - `GET /sdapi/v1/latent-upscale-modes`
@@ -56,6 +57,351 @@ Current endpoints include:
 - `GET /sdcpp/v1/jobs/{id}`
 - `POST /sdcpp/v1/jobs/{id}/cancel`
 - `POST /sdcpp/v1/vid_gen`
+- `POST /sdcpp/v1/upscale`
+
+## Model management
+
+Model management is additive: existing generation request bodies, successful
+responses, job polling and cancellation remain unchanged. All three API families
+use the current loaded context. Starting with the existing model arguments
+preserves command-line preloading and its generation defaults; it does not
+require a recipe.
+
+Recipe defaults apply when a generation request omits the corresponding
+parameters. Image editing endpoints retain their existing input-image size
+inference when dimensions are omitted.
+
+Without a loaded model, generation endpoints return HTTP 503 with
+`{"error":"No model is loaded","code":"model_not_loaded"}`.
+While loading/unloading, endpoints that access the context return HTTP 503
+with `code: "model_loading"`. These errors retain the existing string-valued
+`error` field. Job polling/cancellation, catalog queries and model status remain
+available during loading. Model lists are empty when no model is loaded;
+`/v1/models` retains the `sd-cpp-local` ID when ready.
+
+| Method | Endpoint | Response / behavior |
+| --- | --- | --- |
+| GET | `/sdcpp/v1/recipes` | `{recipes: [...], errors: [...]}` |
+| GET | `/sdcpp/v1/model-files` | `{files: [{id, name, category, root, relative_path}], errors: [...]}` |
+| POST | `/sdcpp/v1/models/refresh` | Rescan recipes and files; return `{errors: [...]}` |
+| GET | `/sdcpp/v1/models/status` | Current state, recipe, selection, error, loading time and optional revision |
+| POST | `/sdcpp/v1/models/load` | Load the submitted recipe and selection; return status after completion. A load is a no-op returning the current status with `already_loaded: true` only when the state is ready and the fully resolved selection, the complete recipe object, and the resolved component paths all match the active model; a catalog refresh with modified recipe metadata or a retargeted model path therefore reloads even with an unchanged recipe ID and selection |
+| POST | `/sdcpp/v1/models/unload` | Release the active context; return empty status |
+
+Load request:
+
+```json
+{
+  "recipe": "flux1-dev",
+  "models": {
+    "diffusion_model": "diffusion_models/flux1-dev.gguf",
+    "clip_l": "text_encoders/clip_l.safetensors",
+    "t5xxl": "text_encoders/t5xxl.safetensors",
+    "vae": "vae/ae.safetensors"
+  }
+}
+```
+
+File IDs are opaque strings returned by `model-files`. The first model root
+retains the existing relative IDs, such as `checkpoints/nested/model.gguf`.
+Additional roots use `@<root-id>/<relative-path>` so identical paths in different
+roots remain selectable. Root qualifiers derive from the canonical root path;
+adding unrelated roots or refreshing the catalog does not change them. Moving
+a root changes its qualifier. Do not construct IDs or use display names in load
+requests.
+
+The display `name` omits the physical category directory (including aliases such
+as `Stable-diffusion`). Duplicate display paths use the full absolute file path,
+with the source directories before the filename and no hash suffix.
+`root` is an opaque source identifier, and
+`relative_path` is the file path beneath that root. Duplicate canonical files
+appear only once, using the first root that discovers them. Categories depend
+on directories, never on filename suffixes such as `.vae.safetensors`.
+
+Repeated `--model-dir` arguments merge roots in order; absent arguments default
+to `./models`. User recipes override built-ins; the earliest root containing a
+valid user recipe wins across roots. Duplicate recipe IDs within one root are
+rejected. Directory aliases do not change recipe slot categories.
+
+LoRA lists retain relative `path` IDs for `loras/` in the first model root and
+for an explicit `--lora-model-dir`, and qualify other directories. The additive `display_path` field provides a readable
+relative path, or the full absolute file path when needed to distinguish duplicates.
+Continue sending `path` in structured LoRA requests. `--lora-model-dir` overrides
+automatic discovery across all model roots.
+Absolute paths, unknown files, wrong categories and
+paths escaping the configured root are rejected. Optional slots can be omitted
+or set to an empty string. Load/unload returns HTTP 409 (`model_busy`) while
+requests or queued jobs are pending. Invalid configurations return HTTP 400
+(`invalid_model_config`) before unloading the current context. An initialization
+failure returns HTTP 422 (`model_load_failed`) and leaves no active context.
+The load HTTP request waits for completion; a separate client can poll status
+while it runs. Refreshing the catalog never modifies an already loaded context.
+
+Status uses `state: empty | loading | ready | error`, `recipe` (ID or null),
+`models` (slot-to-file-ID mapping), and `error` (string or null). A monotonically
+increasing `revision` identifies runtime transitions within this server process.
+Command-line preloading keeps `origin: command_line` and `recipe: null` for
+compatibility, and adds `runtime_recipe`: a read-only `@command-line` recipe
+with all feature declarations enabled. It is only available while that context
+is loaded and cannot be submitted to `models/load`. The UI selects it by default
+and uses command-line generation defaults, not defaults from a catalog recipe.
+Capabilities also include this status as an additive `runtime` field.
+
+`load_elapsed_seconds` is the server-measured duration in seconds (a number or
+null). It updates while a model is loading and freezes on success or failure.
+Timing starts after selection validation and includes releasing the previous
+model. It resets for each load and is null before any load and during/after
+unloading. Command-line preloading reports its completed initialization time.
+Poll `/sdcpp/v1/models/status` to display elapsed time, including while loading;
+timer updates alone do not change `revision`.
+
+### Recipe feature declarations
+
+Recipes may declare `features` and `disabled_features` arrays. The server starts
+with shared defaults, enables features declared by component slots and `features`,
+then applies `disabled_features` last. A disabled feature always wins. Unknown
+names, non-array values and duplicate names within an array are rejected.
+Both fields are optional; existing recipes remain valid.
+
+```json
+{
+  "features": ["flow_shift", "distilled_guidance"],
+  "disabled_features": ["clip_skip", "lora"]
+}
+```
+
+Default-enabled features are `img2img`, `mask_image`, `lora`, `vae_tiling`,
+`cache`, `cache_dit` and `preview`. All other features below default to false:
+
+| Feature | Controls |
+| --- | --- |
+| `flow_shift` | Flow shift, where used by the selected scheduler |
+| `distilled_guidance` | Distilled guidance embedding |
+| `shifted_timestep` | SDXL timestep shifting |
+| `img_cfg` | Image CFG |
+| `slg` | Skip-layer guidance fields |
+| `clip_skip` | CLIP Skip |
+| `img2img`, `mask_image` | Image initialization/strength and masks |
+| `ref_images` | Reference image inputs |
+| `ref_videos` | Reference videos as frame arrays |
+| `ref_audios` | Standalone reference audio; runtime requires an Audio VAE or Audio Encoder |
+| `ref_video_audios` | Soundtracks paired with reference videos; runtime requires an Audio VAE |
+| `controlnet` | Control image and ControlNet strength |
+| `control_image` | Control image without a separate ControlNet (FLUX Canny/Depth) |
+| `ip_adapter` | IP-Adapter image and strength |
+| `init_image`, `end_image` | Video start/end frames |
+| `control_frames`, `vace` | Video control frames and VACE strength |
+| `high_noise` | High-noise pass, MoE boundary and high-noise LoRAs |
+| `lora`, `vae_tiling` | LoRA overrides and VAE tiling |
+| `cache`, `cache_unet`, `cache_dit` | Cache panel and architecture-specific algorithms |
+| `preview`, `preview_tae` | Preview panel and TAE preview option |
+
+A `control_net` slot enables `controlnet`, `ip_adapter` enables `ip_adapter`,
+`high_noise_diffusion_model` enables `high_noise`, and `tae`/`taesd` enables `preview_tae`, unless explicitly disabled.
+ControlNet controls are shown when previewing a supporting recipe, even before
+a model file is selected. High-noise and TAE controls additionally require their
+component to be selected. Runtime capabilities require the component to be loaded.
+PuLID disables SLG while selected.
+Image-only and video-only inputs are filtered by the active generation mode.
+Eta depends on the selected sampler; SCM fields only apply to DBCache,
+TaylorSeer and Cache-DIT. Empty panels and advanced sections are hidden.
+
+`GET /sdcpp/v1/recipes` adds a resolved boolean `effective_features` object to
+each recipe. This is response-only metadata, like `source` and slot `categories`;
+omit it when writing a user recipe file. The defaults are maintained by the
+server, not duplicated by the frontend.
+
+`GET /sdcpp/v1/capabilities` adds `generation_features` for the loaded context,
+derived from the active recipe and component availability without inferring
+features from model-family names. When no model is loaded, every feature is
+present and false. The UI can still preview a selected recipe using its
+`effective_features` before loading.
+Existing `features` / `features_by_mode` keys are retained and their model-specific
+values reflect these declarations. A loaded recipe is snapshotted: refreshing
+recipe files does not change the active context's capabilities until reloading.
+Command-line preloading uses the runtime-only all-features recipe instead of model-family inference
+and component paths; variant-specific recipe declarations are more precise.
+
+These declarations govern the Web UI and advertised capabilities, not API
+request validation. Existing generation APIs continue accepting their existing
+fields. The Web UI omits unsupported/hidden fields and ignores hidden image
+inputs when building requests, so switching recipes cannot submit stale options.
+
+### User recipe format
+
+Contributions to the built-in catalog must follow the
+[built-in recipe policy](recipes/README.md). Personal user recipes may define
+workflow-specific presets without adding them to the built-in catalog.
+
+Each UTF-8 JSON file in `<model-dir>/recipes/` defines one complete recipe.
+The maximum recipe file size is 1 MiB. Unknown fields, invalid types and
+duplicate slots are errors. Built-ins in `examples/server/recipes/*.json` use
+the same one-recipe-per-file schema:
+
+```json
+{
+  "schema_version": 1,
+  "id": "my-flux",
+  "name": "My FLUX",
+  "description": "FLUX.1 dev",
+  "size_multiple": 16,
+  "model_url": "https://huggingface.co/black-forest-labs/FLUX.1-dev",
+  "slots": [
+    {"id": "diffusion_model", "required": true},
+    {"id": "clip_l", "required": true},
+    {"id": "t5xxl", "required": true},
+    {"id": "vae", "required": false},
+    {"id": "tae", "required": false}
+  ],
+  "required_any": [["vae", "tae"]],
+  "defaults": {"width": 1024, "height": 1024, "cfg_scale": 1.0, "distilled_guidance": 3.5, "sampling_method": "euler", "steps": 20}
+}
+```
+
+IDs contain 1–128 ASCII letters, digits, dots, underscores or hyphens.
+`name`, `schema_version: 1` and `slots` are required; `description` and
+`model_url`, `required_any`, `defaults`, `context`, `features`, `disabled_features`
+and `size_multiple`, `video_constraints` are optional. Each slot requires only `id` and boolean `required`.
+The server supplies the default label and search directories for each slot.
+An optional nonempty `label` overrides the display name, for example
+`{"id": "diffusion_model", "label": "Low-noise diffusion model", "required": true}`.
+Legacy `category` fields remain accepted, but must match one of the slot's
+supported directories; they cannot redefine or restrict its search directories.
+At least one required `model` or `diffusion_model` slot is necessary.
+
+An optional top-level `models` object maps slot IDs to file IDs, providing
+recipe-local defaults for component selection. A load request may omit
+`models` entirely and load with the recipe's defaults. Selections sent in the
+request always override recipe defaults, slot by slot. An empty string
+disables a slot's recipe default (omitting the slot selects it); the empty
+key is then normalized out of the reported selection, so for slots without a
+recipe default an empty selection loads identically to an omitted one.
+
+`size_multiple` is a positive integer from 1 to 4096 that declares the width and
+height increment used by the web UI. It defaults to `8` when omitted; the UI also
+uses `8` before a recipe is selected. For example, `"size_multiple": 16` makes
+generated size presets multiples of 16. Exact dimensions that do not match the
+increment require correction before submission. This is recipe metadata, not a
+generation parameter, and does not change the core model's alignment behavior.
+
+`video_constraints` is optional metadata for the web UI's Frames / Duration
+controls. It does not override the runtime's model-specific rules. For example:
+
+```json
+"video_constraints": {
+  "frame_step": 4,
+  "frame_offset": 1,
+  "frame_rounding": "floor",
+  "min_frames": 1
+}
+```
+
+Legal frame counts are `frame_step * n + frame_offset`, with integer `n >= 0`,
+within the inclusive `min_frames` / `max_frames` range. All fields are optional:
+
+| Field | Default | Accepted values |
+| --- | --- | --- |
+| `frame_step` | `1` | Integer 1–4096 |
+| `frame_offset` | `0` | Integer 0 to `frame_step - 1` |
+| `frame_rounding` | `"floor"` | `"floor"` or `"ceil"` |
+| `min_frames` | `1` | Integer 1–4096 |
+| `max_frames` | `4096` | Integer 1–4096, at least `min_frames` |
+| `fixed_fps` | Unset | Integer 1–240; locks the FPS control |
+
+The range must contain at least one legal frame count. Unknown keys are rejected.
+Omitting the object adds no frame alignment in the UI. `defaults.fps` only sets
+the initial FPS; it does not lock it. The UI multiplies requested duration by FPS,
+aligns using the declared rounding direction, then clamps to the legal range.
+Duration stays in the UI; generation requests still send only `video_frames` and
+`fps`. Switching input modes preserves the aligned length. Changing FPS keeps
+frames in Frames mode, and keeps the requested seconds in Duration mode.
+
+`model_url` is an optional HTTPS Hugging Face model repository link, shown beside
+the recipe description. Built-ins link to the model's author/publisher, not repacks.
+`required_any` contains groups of declared slot IDs. At least one model in each
+group must be selected. For example, `"required_any": [["vae", "tae"]]` with both
+slots marked `required: false` allows either the full VAE or a compatible TAE.
+Selecting both is allowed; the current server uses TAE for encoding/decoding when
+TAE is selected. Checkpoint recipes with a bundled VAE do not need this group.
+Use complete, model-compatible TAE weights; decoder-only preview weights cannot
+replace a full VAE. Pixel-space models and unsupported latent formats have no
+TAE slot.
+
+| Slot IDs | Search directories |
+| --- | --- |
+| `model` | `checkpoints` |
+| `diffusion_model`, `high_noise_diffusion_model`, `uncond_diffusion_model` | `diffusion_models` |
+| `clip_l`, `clip_g`, `t5xxl`, `llm`, `audio_encoder`, `embeddings_connectors` | `text_encoders` |
+| `clip_vision` | `clip_vision` |
+| `llm_vision` | `text_encoders` or `clip_vision` |
+| `vae`, `audio_vae` | `vae` |
+| `tae` (legacy alias: `taesd`) | `vae` or `vae_approx` |
+| `tokenizer` | `tokenizers` |
+| `control_net` | `controlnet` |
+| `ip_adapter` | `ipadapter` |
+| `motion_module` | `motion_modules` |
+| `photo_maker` | `photomaker` |
+| `pulid_weights` | `pulid` |
+
+Built-in recipes use `tae` for the Tiny AutoEncoder slot. TAE selections can use files from either `vae/` or the legacy
+`vae_approx/` directory. Existing recipes and load requests using `taesd`
+remain supported. Do not specify both `tae` and `taesd` in the same recipe
+or load request.
+
+Model files can use `.gguf`, `.safetensors`, `.sft`, `.ckpt`, `.pt`, `.pth`
+or `.bin` extensions. The tokenizer category lists `.json` files only.
+Custom recipes compose components supported by the backend; they do not add
+new model architectures.
+
+Optional `context` settings apply to each model load and override the matching
+startup setting. Supported fields are `vae_format` (`auto`, `flux`, `sd3`,
+`flux2`, or `wan`), `model_args` (a string in the same format as
+`--model-args`; replaces the startup string), and `backend` / `params_backend`
+(strings in the same format as `--backend` / `--params-backend`; replace the
+startup assignments for that load, so a recipe can place components on
+specific devices, e.g. keep a large text encoder on CPU while another recipe
+uses the GPU). Other startup settings remain unchanged. Switching to a
+recipe that omits these fields restores the startup values. For example, PiD
+uses `{"vae_format": "flux"}` and Qwen Image Edit 2511 uses
+`{"model_args": "qwen_image_zero_cond_t=true"}`.
+
+Supported defaults:
+
+- Integer `width`/`height` (64–4096), `steps` (1–1000), `video_frames`
+  (1–4096), `fps` (1–240), `shifted_timestep` (0–1000), and
+  `high_noise_steps` (1–1000 or -1 for automatic).
+- Numeric `cfg_scale`, `img_cfg_scale`, `distilled_guidance`, `flow_shift`,
+  `high_noise_cfg_scale`, and `high_noise_flow_shift` (0–1000).
+- Numeric `strength` (0–1), used for image-to-image denoising, and
+  `moe_boundary` (0–1), used for automatic Wan MoE expert switching.
+- `custom_sigmas`: an empty array or 2–1001 finite, nonnegative numbers.
+  A nonempty array overrides the generated schedule; the sigma count minus one
+  determines the actual step count. Include the final zero. An empty array uses
+  the generated schedule. Loaded recipe sigmas apply to generation requests
+  unless `sample_params.custom_sigmas` overrides them; switching recipes restores
+  that recipe's schedule or the startup default.
+- Supported `sampling_method`/`scheduler` and
+  `high_noise_sampling_method`/`high_noise_scheduler` names.
+
+Other generation parameters continue to use startup defaults unless explicitly
+supplied by the generation request. Built-in Wan recipes provide video defaults;
+use `/sdcpp/v1/vid_gen` after loading a video model.
+LoRAs are merged from `loras/` and `Lora/` in every model root unless
+`--lora-model-dir` is supplied.
+
+Recipe responses fill in each slot's `label`, `category` (the legacy value,
+if supplied, or the first search directory), and `categories` (the complete
+server-defined list of search directories). Clients should filter model files
+using `categories`; `category` remains available for older clients.
+For example, `{"id": "tae", "required": false}` expands to
+`{"id": "tae", "required": false, "label": "TAE", "category": "vae", "categories": ["vae", "vae_approx"]}`.
+
+Recipe responses also add `source: builtin | user` and, for user recipes, `file`.
+Do not include `source`, `file`, or slot `categories` in a recipe file. A valid user recipe
+replaces a built-in with the same ID in full; inheritance/partial merging is
+not supported. Invalid recipes are skipped. Multiple valid user files sharing
+an ID are all skipped, preserving any built-in with that ID. Catalog errors
+are returned as `{file, message}` entries.
 
 ## `sd_cpp_extra_args`
 
@@ -147,6 +493,19 @@ Currently supported multipart form fields:
 Native extension fields:
 
 - any `sdcpp API` fields embedded through `sd_cpp_extra_args` inside `prompt`
+
+Uploaded images are decoded at their original dimensions. The first decoded
+image establishes the generation dimensions if `size` is omitted. Input
+geometry follows `image_preprocess`: references preserve their dimensions by
+default, while init and mask use the generation canvas preset.
+
+Reference encoding then follows model presets and `ref_image_args`. To skip
+input geometry for references and disable resizing before VAE encoding, include
+this in `prompt`:
+
+```text
+edit this image <sd_cpp_extra_args>{"image_preprocess":"target=ref,mode=none","ref_image_args":"resize_before_vae=false"}</sd_cpp_extra_args>
+```
 
 Response fields:
 
@@ -264,6 +623,26 @@ Response fields:
 | `parameters` | `object` | Echo of the parsed outer request body |
 | `info` | `string` | Currently empty string |
 
+#### `GET /sdapi/v1/progress`
+
+Poll this endpoint while a synchronous SDAPI generation request is running.
+An optional `id_task` query parameter selects the task with the same `id_task`
+provided in the generation request (default: `"sdapi"`). Set
+`skip_current_image=true` or `1` to omit the preview image.
+
+`current_image` contains the latest base64 JPEG latent projection, or `null`
+when unavailable. `state.sampling_step` is the positive logical step and
+`state.sampling_steps` is the actual step count for the current sampling pass,
+including schedule and img2img strength adjustments. `state.job_no` is the
+zero-based pass index; `state.job_count` includes one pass per batch image and
+an additional pass per image when highres fix is enabled. `progress` weights
+these passes equally. Sampling progress can reach `1` before final decoding
+finishes; `eta_relative` is currently always `0`.
+
+When no SDAPI task is active, or `id_task` does not match, the endpoint returns
+`progress=0`, `state.job=""`, zero job/step counts, and `current_image=null`.
+Completed and failed requests do not retain an active preview.
+
 #### Discovery / Compatibility Endpoints
 
 Currently exposed:
@@ -374,7 +753,7 @@ Common job shape:
   "id": "job_01HTXYZABC",
   "kind": "img_gen",
   "status": "queued",
-  "created": 1775401200,
+  "created": 1775401200000,
   "started": null,
   "completed": null,
   "queue_position": 2,
@@ -396,6 +775,77 @@ Field types:
 | `queue_position` | `integer` |
 | `result` | `object \| null` |
 | `error` | `object \| null` |
+| `progress` | `object` |
+| `preview` | `object \| null` |
+
+`created`, `started`, and `completed` are integer Unix timestamps in
+**milliseconds**. Subtract `started` from `completed` and divide by 1000 to get
+the elapsed generation time in seconds, including output encoding and excluding
+queue time.
+
+`progress` is available independently of the preview setting, for both image
+and video jobs. Continue polling until `status` is terminal: a sampling pass
+can finish before decoding, ADetailer, or output encoding finishes.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `progress.stage` | `string` | Current execution stage; see below |
+| `progress.detail` | `string` | Stage detail, or an empty string |
+| `progress.pass` | `integer` | Sampling pass number within the job; zero before sampling |
+| `progress.completed` | `integer \| null` | Completed units in the current stage/pass |
+| `progress.total` | `integer \| null` | Actual total units, or null when unknown |
+| `progress.unit` | `string \| null` | `steps` for sampling, `images` for image output encoding; null when uncounted |
+| `progress.stage_elapsed_ms` | `integer` | Elapsed time in the current stage/detail/pass |
+| `progress.elapsed_ms` | `integer` | Job execution time, excluding queue time; zero before execution |
+
+Stages include `queued`, `waiting` (waiting for the execution lock), `preparing`,
+`conditioning`, `sampling`, `vae_encode`, `vae_decode`, `audio_decode`,
+`upscaling`, `adetailer`, and `encoding`. Stages may repeat or be skipped.
+Details include `positive_prompt` / `negative_prompt` / `image_condition` for
+conditioning, `high_noise` / `low_noise` for two-stage sampling, and `image` /
+`video` for output encoding. During ADetailer, `detail` identifies the inner
+stage, such as `conditioning` or `sampling`. Clients should tolerate unknown
+stage, detail, and unit values.
+
+Sampling counts completed logical steps using the actual schedule, including
+strength adjustments. Each new sampling pass increments `pass` and starts at
+zero, including batch items, highres passes, high/low-noise passes, and ADetailer
+passes. The ratio is **current-pass progress**, not overall job completion.
+The progress snapshot is published atomically. Preview metadata still describes
+the preview frame, which may be older than the current progress.
+
+Unknown totals are represented by null counts, not an estimated percentage.
+For example, prompt encoding can report:
+
+```json
+"progress": {
+  "stage": "conditioning",
+  "detail": "positive_prompt",
+  "pass": 0,
+  "completed": null,
+  "total": null,
+  "unit": null,
+  "stage_elapsed_ms": 3200,
+  "elapsed_ms": 4100
+}
+```
+
+Elapsed times freeze when a job completes, fails, or is cancelled; the last
+stage is retained for inspection. Use `status` to determine the final outcome.
+Elapsed time alone does not indicate that computation is advancing.
+
+`preview` sub-fields:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `preview.pass` | `integer` | Sampling pass number, starting at 1 within the job |
+| `preview.step` | `integer` | Positive logical sample step within this pass |
+| `preview.total_steps` | `integer` | Actual sample steps in this pass, after schedule and strength adjustments |
+| `preview.b64_json` | `string` | Base64-encoded PNG of the current preview frame |
+
+The preview is updated in place as sampling progresses; poll `GET /sdcpp/v1/jobs/{id}` to retrieve the latest frame. Only the most recent preview is retained.
+
+`step / total_steps` describes the current sampling pass, not overall job completion. A new batch item, high/low-noise stage, or highres pass increments `pass` and restarts `step`. Samplers with multiple denoiser evaluations per logical step may update a preview more than once at the same step. The frame and its pass/step metadata are published together.
 
 ### Endpoints
 
@@ -421,7 +871,9 @@ Top-level fields:
 | `samplers` | `array<string>` | Available sampling methods |
 | `schedulers` | `array<string>` | Available schedulers |
 | `loras` | `array<object>` | Available LoRA entries |
-| `upscalers` | `array<object>` | Available model-backed highres upscalers |
+| `upscalers` | `array<object>` | Available highres upscalers, built-in and model-backed |
+| `upscale` | `boolean` | Whether a compatible RGB ESRGAN model is available for `POST /sdcpp/v1/upscale` |
+| `preview_modes` | `array<string>` | Available preview modes, e.g. `["none", "proj", "tae", "vae"]` |
 | `limits` | `object` | Shared queue and size limits |
 
 `model`
@@ -457,12 +909,15 @@ Shared nested fields:
 | --- | --- |
 | `loras[].name` | `string` |
 | `loras[].path` | `string` |
+| `loras[].display_path` | `string` (display only) |
 
 `upscalers`
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `upscalers[].name` | `string` | Built-in name or model stem; use this value in `hires.upscaler` |
+| `upscalers[].model` | `boolean` | True for a model-backed upscaler, false for a built-in scaling filter |
+| `upscalers[].image_upscale` | `boolean` | Whether this model can be selected by `POST /sdcpp/v1/upscale`; false for latent upscalers and built-in filters |
 
 Built-in entries include `None`, `Lanczos`, `Nearest`, `Latent`, `Latent (nearest)`, `Latent (nearest-exact)`, `Latent (antialiased)`, `Latent (bicubic)`, and `Latent (bicubic antialiased)`. Model-backed entries are scanned from the top level of `--hires-upscalers-dir`; subdirectories are not scanned.
 
@@ -476,6 +931,8 @@ Built-in entries include `None`, `Lanczos`, `Nearest`, `Latent`, `Latent (neares
 | `limits.max_height` | `integer` |
 | `limits.max_batch_count` | `integer` |
 | `limits.max_queue_size` | `integer` |
+| `limits.max_upscale_width` | `integer` |
+| `limits.max_upscale_height` | `integer` |
 
 Shared default fields used by both `img_gen` and `vid_gen`:
 
@@ -505,11 +962,11 @@ Shared default fields used by both `img_gen` and `vid_gen`:
 | `vae_tiling_params` | `object` |
 | `vae_tiling_params.enabled` | `boolean` |
 | `vae_tiling_params.temporal_tiling` | `boolean` |
-| `vae_tiling_params.tile_size_x` | `integer` |
-| `vae_tiling_params.tile_size_y` | `integer` |
+| `vae_tiling_params.tile_size_w` | `integer` |
+| `vae_tiling_params.tile_size_h` | `integer` |
 | `vae_tiling_params.target_overlap` | `number` |
-| `vae_tiling_params.rel_size_x` | `number` |
-| `vae_tiling_params.rel_size_y` | `number` |
+| `vae_tiling_params.rel_size_w` | `number` |
+| `vae_tiling_params.rel_size_h` | `number` |
 | `vae_tiling_params.extra_tiling_args` | `string` |
 | `cache_mode` | `string` |
 | `cache_option` | `string` |
@@ -518,7 +975,9 @@ Shared default fields used by both `img_gen` and `vid_gen`:
 | `output_format` | `string` |
 | `output_compression` | `integer` |
 
-`vae_tiling_params.extra_tiling_args` accepts a key=value list. Supported video VAEs accept `temporal_tile_frames` (alias `temporal_tile_size`, default `4`) and `temporal_tile_overlap` (default `1`).
+`vae_tiling_params.tile_size_w` and `tile_size_h` are in **image pixels**, with `0` selecting the 256-pixel default. Both encode and decode use these sizes without an encoding multiplier. Positive `rel_size_w`/`rel_size_h` values override the corresponding absolute size: values up to 1 are dimension fractions, and values greater than 1 are target tile counts. Set `enabled` to use spatial tiling. Sizes are aligned down to the VAE scale factor and capped at the input dimensions; explicit sizes below the minimum supported tile size are rejected. These fields previously used latent units; see [VAE tiling](../../docs/performance.md#use-vae-tiling-to-reduce-encode-and-decode-memory-usage) for migration and OOM retry behavior.
+
+`vae_tiling_params.extra_tiling_args` accepts a key=value list. Supported video VAEs accept `temporal_tile_frames` (alias `temporal_tile_size`, default `4`) and `temporal_tile_overlap` (default `1`). Wan2.2 TI2V 5B uses `temporal_decode_frames` (default `1`) to decode multiple latent frames per forward pass, trading additional memory for throughput; other model versions ignore this option.
 LTX and Wan preserve causal state between temporal tiles. Hunyuan Video and TAEHV use overlap blending. MiniMax H3 keeps its model-specific fixed temporal windows because its latent-to-frame mapping is non-linear.
 
 `img_gen`-specific default fields:
@@ -526,9 +985,10 @@ LTX and Wan preserve causal state between temporal tiles. Hunyuan Video and TAEH
 | Field | Type |
 | --- | --- |
 | `batch_count` | `integer` |
-| `auto_resize_ref_image` | `boolean` |
+| `ref_image_args` | `string` |
 | `increase_ref_index` | `boolean` |
 | `control_strength` | `number` |
+| `control_type` | `string` |
 | `ip_adapter_strength` | `number` |
 | `hires` | `object` |
 | `hires.enabled` | `boolean` |
@@ -547,6 +1007,7 @@ LTX and Wan preserve causal state between temporal tiles. Hunyuan Video and TAEH
 | --- | --- |
 | `video_frames` | `integer` |
 | `fps` | `integer` |
+| `ref_image_args` | `string` |
 | `moe_boundary` | `number` |
 | `vace_strength` | `number` |
 | `high_noise_sample_params` | `object` |
@@ -577,6 +1038,7 @@ Fields returned in `features_by_mode.img_gen`:
 - `cache`
 - `cancel_queued`
 - `cancel_generating`
+- `preview`
 
 Fields returned in `features_by_mode.vid_gen`:
 
@@ -589,6 +1051,7 @@ Fields returned in `features_by_mode.vid_gen`:
 - `cache`
 - `cancel_queued`
 - `cancel_generating`
+- `preview`
 
 #### `POST /sdcpp/v1/img_gen`
 
@@ -603,7 +1066,7 @@ Example response:
   "id": "job_01HTXYZABC",
   "kind": "img_gen",
   "status": "queued",
-  "created": 1775401200,
+  "created": 1775401200000,
   "poll_url": "/sdcpp/v1/jobs/job_01HTXYZABC"
 }
 ```
@@ -628,9 +1091,59 @@ Typical status codes:
 - `404 Not Found`
 - `410 Gone`
 
+#### `POST /sdcpp/v1/upscale`
+
+Runs one RGB ESRGAN upscaler over an image, with no generation involved. Latent upscaler models remain available for hires generation but cannot be used here.
+
+This is the HTTP equivalent of `sd-cli -M upscale`: no diffusion model, text
+encoder or sampling is used, so it is fast enough to answer synchronously and
+does not create a job.
+
+Request fields:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `image` | `string` | Required. Base64 or data URL image |
+| `upscaler` | `string` | A name from `upscalers` with `image_upscale: true`; the first compatible entry when omitted |
+| `repeats` | `integer` | Run the upscaler this many times, 1 to 4 (default `1`) |
+| `tile_size` | `integer` | Tile size, defaulting to the server's `--upscale-tile-size` |
+| `output_format` | `string` | `png`, `jpeg`, or `webp` when built with WebP support (default `png`); unsupported formats return 400 |
+| `output_compression` | `integer` | Range is clamped to `0..100` |
+
+Response fields:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `images` | `array<object>` | One image |
+| `images[].index` | `integer` | |
+| `images[].b64_json` | `string` | Base64-encoded image bytes |
+| `upscaler` | `string` | The upscaler actually used |
+| `scale` | `integer` | The model's scale factor |
+| `repeats` | `integer` | How many times it was run |
+| `width` | `integer` | Result width |
+| `height` | `integer` | Result height |
+| `output_format` | `string` | Final encoded image format |
+
+Typical status codes:
+
+- `200 OK`
+- `400 Bad Request` (invalid request, unsupported output format, unreadable image, incompatible upscaler, or output dimensions exceeding the limit)
+- `500 Internal Server Error`
+
+Notes:
+
+- Final output dimensions, including all repeats, must not exceed 8192 pixels on either axis (`limits.max_upscale_width` and `limits.max_upscale_height`). Requests exceeding this bound are rejected before upscaling.
+- The upscaler models are three-channel; alpha is not preserved.
+- The request holds the generation context lock, so an upscale and a
+  generation never run on the device at the same time.
+
 #### `POST /sdcpp/v1/jobs/{id}/cancel`
 
-Attempts to cancel an accepted job.
+Cancels a queued job immediately, or requests interruption of a generating image or
+video job. A generating job returns `200 OK` with `cancel_requested: true` and
+remains `generating` until execution stops at a cancellation checkpoint. Continue
+polling until its status becomes `cancelled`. Cancelled jobs have no result.
+Repeated cancellation requests are safe; terminal jobs are returned unchanged.
 
 Typical status codes:
 
@@ -653,9 +1166,10 @@ Example:
   "strength": 0.75,
   "seed": -1,
   "batch_count": 1,
-  "auto_resize_ref_image": true,
+  "ref_image_args": "",
   "increase_ref_index": false,
   "control_strength": 0.9,
+  "control_type": "",
   "ip_adapter_strength": 1.0,
   "embed_image_metadata": true,
 
@@ -702,11 +1216,11 @@ Example:
   "vae_tiling_params": {
     "enabled": false,
     "temporal_tiling": false,
-    "tile_size_x": 0,
-    "tile_size_y": 0,
+    "tile_size_w": 0,
+    "tile_size_h": 0,
     "target_overlap": 0.5,
-    "rel_size_x": 0.0,
-    "rel_size_y": 0.0,
+    "rel_size_w": 0.0,
+    "rel_size_h": 0.0,
     "extra_tiling_args": ""
   },
 
@@ -714,6 +1228,9 @@ Example:
   "cache_option": "",
   "scm_mask": "",
   "scm_policy_dynamic": true,
+
+  "preview": "none",
+  "preview_interval": 1,
 
   "output_format": "png",
   "output_compression": 100
@@ -728,6 +1245,17 @@ Example:
 
 ### Image Encoding Rules
 
+Native image/video requests and SDAPI accept `image_preprocess` as a rule string
+or array of rule strings. OpenAI-compatible requests can supply it in
+`sd_cpp_extra_args`. See [Image preprocessing](../../docs/image_preprocessing.md)
+for one-time input geometry, native-resolution decoding, mask alignment, and
+`canny=true` for edge detection on any supported image input.
+
+Image generation also accepts `ref_image_args` as a string (for example,
+`"resize_before_vae=false"`) in native and SDAPI requests, or through
+`sd_cpp_extra_args` in OpenAI-compatible requests. It controls downstream
+reference encoding and is independent of input geometry rules.
+
 Any image field accepts:
 
 - a raw base64 string, or
@@ -735,11 +1263,14 @@ Any image field accepts:
 
 Channel expectations:
 
-- `init_image`: 3 channels
-- `ref_images[]`: 3 channels
+- `init_image`: native channels (3 or 4); alpha is preserved and applied per model
+- `ref_images[]`: native channels (3 or 4); alpha is preserved and applied per model
 - `control_image`: 3 channels
 - `ip_adapter_image`: 3 channels
 - `mask_image`: 1 channel
+
+Models that support RGBA (e.g. Qwen-Image 2.1) use the alpha channel of `init_image`
+and `ref_images[]`. RGB-only models drop it, so sending RGBA is safe for every model.
 
 If omitted or null:
 
@@ -760,11 +1291,15 @@ Top-level scalar fields:
 | `strength` | `number` |
 | `seed` | `integer` |
 | `batch_count` | `integer` |
-| `auto_resize_ref_image` | `boolean` |
+| `ref_image_args` | `string` |
+| `image_preprocess` | `string \| array<string>` |
 | `increase_ref_index` | `boolean` |
 | `control_strength` | `number` |
+| `control_type` | `string` |
 | `ip_adapter_strength` | `number` |
 | `embed_image_metadata` | `boolean` |
+| `preview` | `string` |
+| `preview_interval` | `integer` |
 
 Image fields:
 
@@ -820,11 +1355,11 @@ Other native fields:
 | `vae_tiling_params` | `object` |
 | `vae_tiling_params.enabled` | `boolean` |
 | `vae_tiling_params.temporal_tiling` | `boolean` |
-| `vae_tiling_params.tile_size_x` | `integer` |
-| `vae_tiling_params.tile_size_y` | `integer` |
+| `vae_tiling_params.tile_size_w` | `integer` |
+| `vae_tiling_params.tile_size_h` | `integer` |
 | `vae_tiling_params.target_overlap` | `number` |
-| `vae_tiling_params.rel_size_x` | `number` |
-| `vae_tiling_params.rel_size_y` | `number` |
+| `vae_tiling_params.rel_size_w` | `number` |
+| `vae_tiling_params.rel_size_h` | `number` |
 | `vae_tiling_params.extra_tiling_args` | `string` |
 | `cache_mode` | `string` |
 | `cache_option` | `string` |
@@ -852,6 +1387,10 @@ When omitted, backend defaults apply to these fields:
 - `sample_params.flow_shift`
 - `sample_params.guidance.img_cfg`
 
+### Preview Interval Semantics
+
+`preview_interval` controls the period (in sample steps) at which preview frames are generated. The default is `1` (every step). Any non-positive values will be clamped to `1`. Note that if `preview` is set to `"none"`, no previews are produced regardless of the interval.
+
 ### Completion Result
 
 Example completed job:
@@ -861,9 +1400,9 @@ Example completed job:
   "id": "job_01HTXYZABC",
   "kind": "img_gen",
   "status": "completed",
-  "created": 1775401200,
-  "started": 1775401203,
-  "completed": 1775401215,
+  "created": 1775401200000,
+  "started": 1775401203000,
+  "completed": 1775401215237,
   "queue_position": 0,
   "result": {
     "output_format": "png",
@@ -887,9 +1426,9 @@ Example failed job:
   "id": "job_01HTXYZABC",
   "kind": "img_gen",
   "status": "failed",
-  "created": 1775401200,
-  "started": 1775401203,
-  "completed": 1775401204,
+  "created": 1775401200000,
+  "started": 1775401203000,
+  "completed": 1775401204000,
   "queue_position": 0,
   "result": null,
   "error": {
@@ -908,9 +1447,9 @@ Example cancelled job:
   "id": "job_01HTXYZABC",
   "kind": "img_gen",
   "status": "cancelled",
-  "created": 1775401200,
+  "created": 1775401200000,
   "started": null,
-  "completed": 1775401202,
+  "completed": 1775401202000,
   "queue_position": 0,
   "result": null,
   "error": {
@@ -946,7 +1485,7 @@ Example response:
   "id": "job_01HTXYZVID",
   "kind": "vid_gen",
   "status": "queued",
-  "created": 1775401200,
+  "created": 1775401200000,
   "poll_url": "/sdcpp/v1/jobs/job_01HTXYZVID"
 }
 ```
@@ -966,8 +1505,9 @@ Response fields:
 Compared with `img_gen`, the `vid_gen` request body:
 
 - `vid_gen` is a single video sequence job, so `batch_count` is not part of the request schema
-- `ref_images`, `mask_image`, `control_image`, `control_strength`, `ip_adapter_image`, `ip_adapter_strength`, and `embed_image_metadata` are not part of the request schema
-- `vid_gen` adds `end_image`, `control_frames`, `high_noise_sample_params`, `video_frames`, `fps`, `moe_boundary`, and `vace_strength`
+- `mask_image`, `control_image`, `control_strength`, `ip_adapter_image`, `ip_adapter_strength`, and `embed_image_metadata` are not part of the request schema
+- `ref_images` is accepted for MiniMax-H3 Ref2VA conditioning; other video model families currently ignore it
+- `vid_gen` adds `end_image`, `control_frames`, `high_noise_sample_params`, `video_frames`, `fps`, `ref_image_args`, `moe_boundary`, and `vace_strength`
 
 Example:
 
@@ -982,11 +1522,13 @@ Example:
   "seed": -1,
   "video_frames": 33,
   "fps": 16,
+  "ref_image_args": "",
   "moe_boundary": 0.875,
   "vace_strength": 1.0,
 
   "init_image": null,
   "end_image": null,
+  "ref_images": [],
   "control_frames": [],
 
   "sample_params": {
@@ -1035,11 +1577,11 @@ Example:
   "vae_tiling_params": {
     "enabled": false,
     "temporal_tiling": false,
-    "tile_size_x": 0,
-    "tile_size_y": 0,
+    "tile_size_w": 0,
+    "tile_size_h": 0,
     "target_overlap": 0.5,
-    "rel_size_x": 0.0,
-    "rel_size_y": 0.0,
+    "rel_size_w": 0.0,
+    "rel_size_h": 0.0,
     "extra_tiling_args": ""
   },
 
@@ -1048,10 +1590,25 @@ Example:
   "scm_mask": "",
   "scm_policy_dynamic": true,
 
+  "preview": "none",
+  "preview_interval": 1,
+
   "output_format": "webm",
   "output_compression": 100
 }
 ```
+
+### Reference Image Rules
+
+- `ref_images` contains reference images for MiniMax-H3 Ref2VA conditioning.
+- Images retain request order and correspond to `<Picture 1>`, `<Picture 2>`, and so on in the prompt.
+- For MiniMax-H3, non-empty `ref_images` cannot be combined with `init_image` or `end_image`. A conflicting API request fails during generation; the WebUI checks this before submission.
+- MiniMax-H3 does not support `control_frames`; leave that array empty.
+- `ref_image_args` applies to `vid_gen`; MiniMax-H3 honors `ref_image_size` there (`match` default, `max` for a 2048 px short edge). Only references above the limit are downscaled; each axis is then snapped to the nearest 32 px multiple.
+- Other video model families currently ignore `ref_images`.
+- `features_by_mode.vid_gen` does not currently advertise `ref_images`; its absence is not an indication that MiniMax-H3 reference images are unsupported.
+
+See [MiniMax-H3 reference conditioning](../../docs/minimax_h3.md#reference-to-audio-video-conditioning) for model requirements and prompt examples.
 
 ### LoRA Rules
 
@@ -1070,6 +1627,7 @@ Channel expectations:
 
 - `init_image`: 3 channels
 - `end_image`: 3 channels
+- `ref_images[]`: decoded with native channels, then converted to RGB by MiniMax-H3
 - `control_frames[]`: 3 channels
 
 Frame ordering rules:
@@ -1097,8 +1655,11 @@ Top-level scalar fields:
 | `seed` | `integer` |
 | `video_frames` | `integer` |
 | `fps` | `integer` |
+| `ref_image_args` | `string` |
 | `moe_boundary` | `number` |
 | `vace_strength` | `number` |
+| `preview` | `string` |
+| `preview_interval` | `integer` |
 
 Image and frame fields:
 
@@ -1106,6 +1667,7 @@ Image and frame fields:
 | --- | --- |
 | `init_image` | `string \| null` |
 | `end_image` | `string \| null` |
+| `ref_images` | `array<string>` |
 | `control_frames` | `array<string>` |
 
 LoRA fields:
@@ -1160,11 +1722,11 @@ Other native fields:
 | `vae_tiling_params` | `object` |
 | `vae_tiling_params.enabled` | `boolean` |
 | `vae_tiling_params.temporal_tiling` | `boolean` |
-| `vae_tiling_params.tile_size_x` | `integer` |
-| `vae_tiling_params.tile_size_y` | `integer` |
+| `vae_tiling_params.tile_size_w` | `integer` |
+| `vae_tiling_params.tile_size_h` | `integer` |
 | `vae_tiling_params.target_overlap` | `number` |
-| `vae_tiling_params.rel_size_x` | `number` |
-| `vae_tiling_params.rel_size_y` | `number` |
+| `vae_tiling_params.rel_size_w` | `number` |
+| `vae_tiling_params.rel_size_h` | `number` |
 | `vae_tiling_params.extra_tiling_args` | `string` |
 | `cache_mode` | `string` |
 | `cache_option` | `string` |
@@ -1235,15 +1797,26 @@ When omitted, backend defaults apply to these fields:
 
 ### Frame Count Semantics
 
-`video_frames` is the requested target length, but the current core video path internally normalizes the effective frame count to the largest `4n + 1` value that does not exceed the requested count.
+`video_frames` is the requested target length. The core normalizes it according
+to the loaded model:
 
-Examples:
+| Model family | Frame alignment | Fixed FPS |
+| --- | --- | --- |
+| Wan, HunyuanVideo, LingBot | `4n + 1`, round down | Wan 2.2 S2V: 16 |
+| LTX | `8n + 1`, round down | None |
+| MiniMax-H3 | `17n + 5`, round up, minimum 5 | 24 |
+| AnimateDiff | Whole frames, maximum 32 | None |
+
+Wan examples:
 
 - `video_frames = 33` stays `33`
 - `video_frames = 34` becomes `33`
 - `video_frames = 32` becomes `29`
 
-The completed job payload includes the actual decoded `frame_count`.
+At 16 FPS, a 5-second target requests 80 frames and aligns to 77 frames for Wan,
+or approximately 4.813 seconds. Audio-driven generation and temporal upscaling
+can change the final length. Use the completed job's actual decoded `frame_count`
+and `fps` for the final playback duration.
 
 ### Completion Result
 
@@ -1254,9 +1827,9 @@ Example completed job:
   "id": "job_01HTXYZVID",
   "kind": "vid_gen",
   "status": "completed",
-  "created": 1775401200,
-  "started": 1775401203,
-  "completed": 1775401215,
+  "created": 1775401200000,
+  "started": 1775401203000,
+  "completed": 1775401215237,
   "queue_position": 0,
   "result": {
     "output_format": "webm",
@@ -1280,9 +1853,9 @@ Example failed job:
   "id": "job_01HTXYZVID",
   "kind": "vid_gen",
   "status": "failed",
-  "created": 1775401200,
-  "started": 1775401203,
-  "completed": 1775401204,
+  "created": 1775401200000,
+  "started": 1775401203000,
+  "completed": 1775401204000,
   "queue_position": 0,
   "result": null,
   "error": {
@@ -1301,9 +1874,9 @@ Example cancelled job:
   "id": "job_01HTXYZVID",
   "kind": "vid_gen",
   "status": "cancelled",
-  "created": 1775401200,
+  "created": 1775401200000,
   "started": null,
-  "completed": 1775401202,
+  "completed": 1775401202000,
   "queue_position": 0,
   "result": null,
   "error": {
@@ -1321,3 +1894,14 @@ Example cancelled job:
 - `400 Bad Request` for an empty body, unsupported model mode, invalid JSON, invalid generation parameters, or an unsupported output format
 - `429 Too Many Requests` when the job queue is full
 - `500 Internal Server Error` for unexpected server exceptions during submission
+
+## Actual generation parameters
+
+Generation responses expose the core `sdcpp.generation/v1` record as
+`generation_info`, independently of `embed_image_metadata`. Native async image
+result items and OpenAI image items contain the parameter snapshot with each
+image's actual seed and without `batch_count`. Native video
+results contain the video request snapshot. SD API `info.generation_info` is an array
+aligned with `info.infotexts` and `info.all_seeds`; the outer `parameters` field
+remains the request echo. See [generation metadata](../../docs/generation_metadata.md)
+for field semantics, postprocessing and container storage.

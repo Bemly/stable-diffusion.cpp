@@ -16,7 +16,7 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 
-#include "ggml/src/ggml-impl.h"
+#include "core/ggml_compat.h"
 
 namespace sd::ggml_graph_cut {
 
@@ -35,8 +35,8 @@ namespace sd::ggml_graph_cut {
     static int graph_leaf_index(ggml_cgraph* gf, const ggml_tensor* tensor) {
         GGML_ASSERT(gf != nullptr);
         GGML_ASSERT(tensor != nullptr);
-        for (int i = 0; i < gf->n_leafs; ++i) {
-            if (gf->leafs[i] == tensor) {
+        for (int i = 0; i < ggml_graph_n_leafs(gf); ++i) {
+            if (ggml_graph_leaf(gf, i) == tensor) {
                 return i;
             }
         }
@@ -389,7 +389,7 @@ namespace sd::ggml_graph_cut {
                         return fail(segment_label + " references an unavailable cut node " +
                                     std::to_string(input.node_index));
                     }
-                } else if (input.leaf_index < 0 || input.leaf_index >= gf->n_leafs) {
+                } else if (input.leaf_index < 0 || input.leaf_index >= ggml_graph_n_leafs(gf)) {
                     return fail(segment_label + " references an invalid leaf " +
                                 std::to_string(input.leaf_index));
                 }
@@ -426,8 +426,8 @@ namespace sd::ggml_graph_cut {
         if (tensor == nullptr || tensor->name[0] == '\0') {
             return false;
         }
-        return starts_with(tensor->name, GGML_RUNNER_CUT_PREFIX) &&
-               ends_with(tensor->name, GGML_RUNNER_CUT_SUFFIX);
+        return std::strncmp(tensor->name, GGML_RUNNER_CUT_PREFIX, std::strlen(GGML_RUNNER_CUT_PREFIX)) == 0 &&
+               tensor->name[std::strlen(tensor->name) - 1] == GGML_RUNNER_CUT_SUFFIX[0];
     }
 
     std::string make_graph_cut_name(const std::string& group, const std::string& output) {
@@ -444,15 +444,15 @@ namespace sd::ggml_graph_cut {
 
     int leaf_count(ggml_cgraph* gf) {
         GGML_ASSERT(gf != nullptr);
-        return gf->n_leafs;
+        return ggml_graph_n_leafs(gf);
     }
 
     ggml_tensor* leaf_tensor(ggml_cgraph* gf, int leaf_index) {
         GGML_ASSERT(gf != nullptr);
-        if (leaf_index < 0 || leaf_index >= gf->n_leafs) {
+        if (leaf_index < 0 || leaf_index >= ggml_graph_n_leafs(gf)) {
             return nullptr;
         }
-        return gf->leafs[leaf_index];
+        return ggml_graph_leaf(gf, leaf_index);
     }
 
     ggml_backend_buffer_t tensor_buffer(const ggml_tensor* tensor) {
@@ -492,35 +492,88 @@ namespace sd::ggml_graph_cut {
         }
     }
 
-    std::vector<uint64_t> graph_layout(ggml_cgraph* graph, bool include_bindings) {
-        std::vector<const ggml_tensor*> tensors;
-        std::unordered_map<const ggml_tensor*, size_t> indices;
-        auto add = [&](const ggml_tensor* tensor) {
-            if (tensor != nullptr && indices.emplace(tensor, tensors.size() + 1).second) {
-                tensors.push_back(tensor);
-            }
+    struct GraphLayoutTensors {
+        struct Entry {
+            const ggml_tensor* tensor = nullptr;
+            size_t index              = 0;
         };
-        for (int i = 0; i < graph->n_leafs; ++i) {
-            add(graph->leafs[i]);
+
+        std::vector<ggml_tensor*> tensors;
+        std::vector<Entry> entries;
+
+        explicit GraphLayoutTensors(size_t graph_size) {
+            tensors.reserve(graph_size);
+            size_t capacity = 2;
+            while (capacity < 2 * graph_size) {
+                capacity *= 2;
+            }
+            entries.resize(capacity);
         }
-        for (int i = 0; i < graph->n_nodes; ++i) {
-            add(graph->nodes[i]);
+
+        size_t find(const ggml_tensor* tensor) const {
+            size_t hash = reinterpret_cast<uintptr_t>(tensor) >> 4;
+            hash ^= hash >> 16;
+            const size_t mask = entries.size() - 1;
+            size_t slot       = hash & mask;
+            while (entries[slot].tensor != nullptr && entries[slot].tensor != tensor) {
+                slot = (slot + 1) & mask;
+            }
+            return slot;
+        }
+
+        void add(ggml_tensor* tensor) {
+            if (tensor == nullptr) {
+                return;
+            }
+            size_t slot = find(tensor);
+            if (entries[slot].tensor != nullptr) {
+                return;
+            }
+            if (2 * (tensors.size() + 1) > entries.size()) {
+                // Segment graphs can reference tensors outside their node and leaf arrays.
+                std::vector<Entry> next(2 * entries.size());
+                entries.swap(next);
+                for (size_t i = 0; i < tensors.size(); ++i) {
+                    entries[find(tensors[i])] = {tensors[i], i + 1};
+                }
+                slot = find(tensor);
+            }
+            entries[slot] = {tensor, tensors.size() + 1};
+            tensors.push_back(tensor);
+        }
+
+        size_t index(const ggml_tensor* tensor) const {
+            return tensor == nullptr ? 0 : entries[find(tensor)].index;
+        }
+    };
+
+    std::vector<uint64_t> graph_layout(ggml_cgraph* graph, bool include_bindings) {
+        const size_t graph_size = static_cast<size_t>(ggml_graph_n_leafs(graph)) + ggml_graph_n_nodes(graph);
+        GraphLayoutTensors layout_tensors(graph_size);
+        const auto& tensors = layout_tensors.tensors;
+        for (int i = 0; i < ggml_graph_n_leafs(graph); ++i) {
+            layout_tensors.add(ggml_graph_leaf(graph, i));
+        }
+        for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+            layout_tensors.add(ggml_graph_node(graph, i));
         }
         for (size_t i = 0; i < tensors.size(); ++i) {
-            add(tensors[i]->view_src);
+            layout_tensors.add(tensors[i]->view_src);
             for (auto source : tensors[i]->src) {
-                add(source);
+                layout_tensors.add(source);
             }
         }
         std::vector<uint64_t> signature;
-        signature.reserve(tensors.size() * 24);
-        signature.push_back(graph->n_nodes);
-        signature.push_back(graph->n_leafs);
-        for (int i = 0; i < graph->n_leafs; ++i) {
-            signature.push_back(indices.at(graph->leafs[i]));
+        const size_t tensor_fields = 5 + 2 * GGML_MAX_DIMS + GGML_MAX_SRC +
+                                     GGML_MAX_OP_PARAMS / sizeof(int32_t) + (include_bindings ? 2 : 0);
+        signature.reserve(2 + graph_size + tensors.size() * tensor_fields);
+        signature.push_back(ggml_graph_n_nodes(graph));
+        signature.push_back(ggml_graph_n_leafs(graph));
+        for (int i = 0; i < ggml_graph_n_leafs(graph); ++i) {
+            signature.push_back(layout_tensors.index(ggml_graph_leaf(graph, i)));
         }
-        for (int i = 0; i < graph->n_nodes; ++i) {
-            signature.push_back(indices.at(graph->nodes[i]));
+        for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+            signature.push_back(layout_tensors.index(ggml_graph_node(graph, i)));
         }
         for (auto tensor : tensors) {
             signature.push_back(tensor->op);
@@ -536,9 +589,9 @@ namespace sd::ggml_graph_cut {
                 signature.push_back(tensor->ne[d]);
                 signature.push_back(tensor->nb[d]);
             }
-            signature.push_back(tensor->view_src == nullptr ? 0 : indices.at(tensor->view_src));
+            signature.push_back(layout_tensors.index(tensor->view_src));
             for (auto source : tensor->src) {
-                signature.push_back(source == nullptr ? 0 : indices.at(source));
+                signature.push_back(layout_tensors.index(source));
             }
             if (!can_ignore_op_params(tensor->op)) {
                 for (int value : tensor->op_params) {
@@ -553,23 +606,27 @@ namespace sd::ggml_graph_cut {
                                    const Plan& plan,
                                    const std::vector<uint64_t>& layout) {
         GGML_ASSERT(gf != nullptr);
-        if (plan.leaf_names.size() != static_cast<size_t>(gf->n_leafs) ||
+        if (plan.leaf_names.size() != static_cast<size_t>(ggml_graph_n_leafs(gf)) ||
             plan.layout != layout) {
             return false;
         }
-        for (int i = 0; i < gf->n_leafs; ++i) {
-            if (plan.leaf_names[i] != gf->leafs[i]->name) {
+        for (int i = 0; i < ggml_graph_n_leafs(gf); ++i) {
+            if (plan.leaf_names[i] != ggml_graph_leaf(gf, i)->name) {
                 return false;
             }
         }
-        std::vector<std::pair<int, std::string>> cut_markers;
+        size_t cut_index = 0;
         for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
             auto node = ggml_graph_node(gf, i);
             if (is_graph_cut_tensor(node)) {
-                cut_markers.emplace_back(i, node->name);
+                if (cut_index >= plan.cut_markers.size() ||
+                    plan.cut_markers[cut_index].first != i || plan.cut_markers[cut_index].second != node->name) {
+                    return false;
+                }
+                ++cut_index;
             }
         }
-        return cut_markers == plan.cut_markers;
+        return cut_index == plan.cut_markers.size();
     }
 
     bool plan_matches_graph(ggml_cgraph* gf, const Plan& plan) {
@@ -597,7 +654,7 @@ namespace sd::ggml_graph_cut {
             }
             return ggml_graph_node(gf, input_ref.node_index);
         }
-        if (input_ref.leaf_index < 0 || input_ref.leaf_index >= gf->n_leafs) {
+        if (input_ref.leaf_index < 0 || input_ref.leaf_index >= ggml_graph_n_leafs(gf)) {
             return nullptr;
         }
         return leaf_tensor(gf, input_ref.leaf_index);
@@ -678,8 +735,7 @@ namespace sd::ggml_graph_cut {
         GGML_ASSERT(segment_graph != nullptr);
 
         for (ggml_tensor* leaf : leaves) {
-            GGML_ASSERT(segment_graph->n_leafs < segment_graph->size);
-            segment_graph->leafs[segment_graph->n_leafs++] = leaf;
+            ggml_graph_add_leaf(segment_graph, leaf);
         }
 
         for (int output_node_index : segment.output_node_indices) {
@@ -696,6 +752,7 @@ namespace sd::ggml_graph_cut {
         for (int node_idx : segment.internal_node_indices) {
             ggml_graph_add_node(segment_graph, ggml_graph_node(gf, node_idx));
         }
+        GGML_ASSERT(ggml_graph_cpy_use_counts(gf, segment_graph));
         *graph_ctx_out = graph_ctx;
         return segment_graph;
     }
@@ -831,8 +888,8 @@ namespace sd::ggml_graph_cut {
             return plan;
         }
         plan.layout = graph_layout(gf, false);
-        for (int i = 0; i < gf->n_leafs; ++i) {
-            plan.leaf_names.emplace_back(gf->leafs[i]->name);
+        for (int i = 0; i < ggml_graph_n_leafs(gf); ++i) {
+            plan.leaf_names.emplace_back(ggml_graph_leaf(gf, i)->name);
         }
         plan.compute_buffer_size =
             measure_graph_compute_buffer(backend, gf, params_tensor_set);
@@ -948,11 +1005,11 @@ namespace sd::ggml_graph_cut {
         return plan;
     }
 
-    Plan resolve_plan(ggml_backend_t backend,
-                      ggml_cgraph* gf,
-                      PlanCache* cache,
-                      const std::unordered_set<const ggml_tensor*>& params_tensor_set,
-                      const char* log_desc) {
+    const Plan& resolve_plan(ggml_backend_t backend,
+                             ggml_cgraph* gf,
+                             PlanCache* cache,
+                             const std::unordered_set<const ggml_tensor*>& params_tensor_set,
+                             const char* log_desc) {
         GGML_ASSERT(backend != nullptr);
         GGML_ASSERT(gf != nullptr);
         GGML_ASSERT(cache != nullptr);

@@ -1,4 +1,5 @@
 #include "stable-diffusion.h"
+#include "generation_info.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -26,13 +27,26 @@ static float get_cache_reuse_threshold(const sd_cache_params_t& params) {
 }
 
 const char* sd_type_name(enum sd_type_t type) {
-    if ((int)type < std::min<int>(SD_TYPE_COUNT, GGML_TYPE_COUNT)) {
-        return ggml_type_name((ggml_type)type);
+    if (type == SD_TYPE_F8_E4M3) {
+        return "f8_e4m3";
+    }
+    if (type == SD_TYPE_F8_E5M2) {
+        return "f8_e5m2";
+    }
+    const auto ggml_type = sd_type_to_ggml_type(type);
+    if (ggml_type != GGML_TYPE_COUNT) {
+        return ggml_type_name(ggml_type);
     }
     return NONE_STR;
 }
 
 enum sd_type_t str_to_sd_type(const char* str) {
+    if (!strcmp(str, "f8_e4m3")) {
+        return SD_TYPE_F8_E4M3;
+    }
+    if (!strcmp(str, "f8_e5m2")) {
+        return SD_TYPE_F8_E5M2;
+    }
     for (int i = 0; i < std::min<int>(SD_TYPE_COUNT, GGML_TYPE_COUNT); i++) {
         auto trait = ggml_get_type_traits((ggml_type)i);
         if (!strcmp(str, trait->type_name)) {
@@ -124,6 +138,7 @@ const char* scheduler_to_str[] = {
     "flux2",
     "flux",
     "beta",
+    "llada_image",
 };
 
 static_assert(SCHEDULER_COUNT == sizeof(scheduler_to_str) / sizeof(scheduler_to_str[0]),
@@ -157,10 +172,13 @@ const char* prediction_to_str[] = {
     "sefi_flow",
     "minit2i_flow",
     "sensenova_u1_flow",
+    "flux3_flow",
+    "h3_av_flow",
+    "ming_image_flow",
 };
 
 const char* sd_prediction_name(enum prediction_t prediction) {
-    if (prediction < PREDICTION_COUNT) {
+    if (prediction >= EPS_PRED && prediction < PREDICTION_COUNT) {
         return prediction_to_str[prediction];
     }
     return NONE_STR;
@@ -249,6 +267,57 @@ enum sd_hires_upscaler_t str_to_sd_hires_upscaler(const char* str) {
     return SD_HIRES_UPSCALER_COUNT;
 }
 
+const char* control_type_to_str[] = {
+    "none",
+    "openpose",
+    "depth",
+    "scribble",
+    "canny",
+    "normal",
+    "segment",
+    "tile",
+    "repaint",
+};
+
+static_assert(SD_CONTROL_TYPE_COUNT == sizeof(control_type_to_str) / sizeof(control_type_to_str[0]),
+              "\nnumber of elements in control_type_to_str[] != SD_CONTROL_TYPE_COUNT");
+
+const char* sd_control_type_name(enum sd_control_type_t control_type) {
+    if (control_type >= SD_CONTROL_TYPE_NONE && control_type < SD_CONTROL_TYPE_COUNT) {
+        return control_type_to_str[control_type];
+    }
+    return NONE_STR;
+}
+
+enum sd_control_type_t str_to_sd_control_type(const char* str) {
+    for (int i = 0; i < SD_CONTROL_TYPE_COUNT; i++) {
+        if (!strcmp(str, control_type_to_str[i])) {
+            return (enum sd_control_type_t)i;
+        }
+    }
+    static const struct {
+        const char* alias;
+        enum sd_control_type_t type;
+    } aliases[] = {
+        {"hed", SD_CONTROL_TYPE_SCRIBBLE},
+        {"softedge", SD_CONTROL_TYPE_SCRIBBLE},
+        {"pidi", SD_CONTROL_TYPE_SCRIBBLE},
+        {"ted", SD_CONTROL_TYPE_SCRIBBLE},
+        {"lineart", SD_CONTROL_TYPE_CANNY},
+        {"anime_lineart", SD_CONTROL_TYPE_CANNY},
+        {"mlsd", SD_CONTROL_TYPE_CANNY},
+        {"seg", SD_CONTROL_TYPE_SEGMENT},
+        {"inpaint", SD_CONTROL_TYPE_REPAINT},
+        {"outpaint", SD_CONTROL_TYPE_REPAINT},
+    };
+    for (const auto& entry : aliases) {
+        if (!strcmp(str, entry.alias)) {
+            return entry.type;
+        }
+    }
+    return SD_CONTROL_TYPE_COUNT;
+}
+
 const char* sd_vae_format_name(enum sd_vae_format_t format) {
     switch (format) {
         case SD_VAE_FORMAT_AUTO:
@@ -312,6 +381,7 @@ void sd_hires_params_init(sd_hires_params_t* hires_params) {
 void sd_ctx_params_init(sd_ctx_params_t* sd_ctx_params) {
     *sd_ctx_params                           = {};
     sd_ctx_params->n_threads                 = sd_get_num_physical_cores();
+    sd_ctx_params->conditioning_cache_size   = 4;
     sd_ctx_params->wtype                     = SD_TYPE_COUNT;
     sd_ctx_params->rng_type                  = CUDA_RNG;
     sd_ctx_params->sampler_rng_type          = RNG_TYPE_COUNT;
@@ -320,9 +390,13 @@ void sd_ctx_params_init(sd_ctx_params_t* sd_ctx_params) {
     sd_ctx_params->max_vram                  = nullptr;
     sd_ctx_params->disable_prefetch          = false;
     sd_ctx_params->disable_segmented_compute = false;
+    sd_ctx_params->batched_cfg               = true;
     sd_ctx_params->eager_load                = false;
     sd_ctx_params->enable_mmap               = false;
+    sd_ctx_params->flash_attn_mode           = nullptr;
+    sd_ctx_params->conv_direct_mode          = nullptr;
     sd_ctx_params->diffusion_flash_attn      = false;
+    sd_ctx_params->sage_attn                 = false;
     sd_ctx_params->linear_scale              = 0.f;
     sd_ctx_params->attn_scale                = 0.f;
     sd_ctx_params->vae_format                = SD_VAE_FORMAT_AUTO;
@@ -349,18 +423,21 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              "t5xxl_path: %s\n"
              "llm_path: %s\n"
              "llm_vision_path: %s\n"
+             "tokenizer: %s\n"
              "diffusion_model_path: %s\n"
              "high_noise_diffusion_model_path: %s\n"
              "uncond_diffusion_model_path: %s\n"
              "embeddings_connectors_path: %s\n"
              "vae_path: %s\n"
              "audio_vae_path: %s\n"
+             "audio_encoder_path: %s\n"
              "taesd_path: %s\n"
              "control_net_path: %s\n"
              "photo_maker_path: %s\n"
              "pulid_weights_path: %s\n"
              "tensor_type_rules: %s\n"
              "n_threads: %d\n"
+             "conditioning_cache_size: %d\n"
              "wtype: %s\n"
              "rng_type: %s\n"
              "sampler_rng_type: %s\n"
@@ -375,7 +452,10 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              "model_args: %s\n"
              "auto_fit: %s\n"
              "flash_attn: %s\n"
+             "flash_attn_mode: %s\n"
+             "conv_direct_mode: %s\n"
              "diffusion_flash_attn: %s\n"
+             "sage_attn: %s\n"
              "linear_scale: %g\n"
              "attn_scale: %g\n"
              "vae_format: %s\n",
@@ -386,18 +466,21 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              SAFE_STR(sd_ctx_params->t5xxl_path),
              SAFE_STR(sd_ctx_params->llm_path),
              SAFE_STR(sd_ctx_params->llm_vision_path),
+             SAFE_STR(sd_ctx_params->tokenizer),
              SAFE_STR(sd_ctx_params->diffusion_model_path),
              SAFE_STR(sd_ctx_params->high_noise_diffusion_model_path),
              SAFE_STR(sd_ctx_params->uncond_diffusion_model_path),
              SAFE_STR(sd_ctx_params->embeddings_connectors_path),
              SAFE_STR(sd_ctx_params->vae_path),
              SAFE_STR(sd_ctx_params->audio_vae_path),
+             SAFE_STR(sd_ctx_params->audio_encoder_path),
              SAFE_STR(sd_ctx_params->taesd_path),
              SAFE_STR(sd_ctx_params->control_net_path),
              SAFE_STR(sd_ctx_params->photo_maker_path),
              SAFE_STR(sd_ctx_params->pulid_weights_path),
              SAFE_STR(sd_ctx_params->tensor_type_rules),
              sd_ctx_params->n_threads,
+             sd_ctx_params->conditioning_cache_size,
              sd_type_name(sd_ctx_params->wtype),
              sd_rng_type_name(sd_ctx_params->rng_type),
              sd_rng_type_name(sd_ctx_params->sampler_rng_type),
@@ -412,7 +495,10 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              SAFE_STR(sd_ctx_params->model_args),
              BOOL_STR(sd_ctx_params->auto_fit),
              BOOL_STR(sd_ctx_params->flash_attn),
+             sd_ctx_params->flash_attn_mode && sd_ctx_params->flash_attn_mode[0] ? sd_ctx_params->flash_attn_mode : "auto (legacy flags honored)",
+             sd_ctx_params->conv_direct_mode && sd_ctx_params->conv_direct_mode[0] ? sd_ctx_params->conv_direct_mode : "auto (legacy flags honored)",
              BOOL_STR(sd_ctx_params->diffusion_flash_attn),
+             BOOL_STR(sd_ctx_params->sage_attn),
              sd_ctx_params->linear_scale,
              sd_ctx_params->attn_scale,
              sd_vae_format_name(sd_ctx_params->vae_format));
@@ -526,6 +612,7 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
              "ref_images_count: %d\n"
              "ref_image_args: %s\n"
              "control_strength: %.2f\n"
+             "control_type: %s\n"
              "photo maker: {style_strength = %.2f, id_images_count = %d, id_embed_path = %s}\n"
              "VAE tiling: %s (temporal=%s, extra_tiling_args=%s)\n"
              "circular_x: %s\n"
@@ -544,6 +631,7 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
              sd_img_gen_params->ref_images_count,
              SAFE_STR(sd_img_gen_params->ref_image_args),
              sd_img_gen_params->control_strength,
+             sd_control_type_name(sd_img_gen_params->control_type),
              sd_img_gen_params->pm_params.style_strength,
              sd_img_gen_params->pm_params.id_images_count,
              SAFE_STR(sd_img_gen_params->pm_params.id_embed_path),
@@ -602,6 +690,7 @@ void sd_vid_gen_params_init(sd_vid_gen_params_t* sd_vid_gen_params) {
     sd_vid_gen_params->hires.custom_sigmas_count             = 0;
     sd_vid_gen_params->circular_x                            = false;
     sd_vid_gen_params->circular_y                            = false;
+    sd_vid_gen_params->ref_image_args                        = "";
     sd_cache_params_init(&sd_vid_gen_params->cache);
 }
 
@@ -609,12 +698,14 @@ struct sd_ctx_t {
     StableDiffusionGGML* sd = nullptr;
 };
 
-static bool sd_version_supports_video_generation(SDVersion version) {
-    return version == VERSION_SVD || sd_version_is_wan(version) || sd_version_is_hunyuan_video(version) || sd_version_is_lingbot_video(version) || sd_version_is_ltxav(version) || sd_version_is_minimax_h3(version);
-}
-
-static bool sd_version_supports_image_generation(SDVersion version) {
-    return !sd_version_supports_video_generation(version);
+void sd_set_generation_progress_callback(sd_ctx_t* ctx, sd_generation_progress_cb_t cb, void* data) {
+    if (ctx == nullptr || ctx->sd == nullptr) {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(ctx->sd->execution_mutex);
+    if (!ctx->sd->executing_) {
+        ctx->sd->generation_progress.set_callback(cb, data);
+    }
 }
 
 sd_ctx_t* new_sd_ctx(const sd_ctx_params_t* sd_ctx_params) {
@@ -699,14 +790,20 @@ SD_API bool sd_ctx_has_control_net(const sd_ctx_t* sd_ctx) {
     if (sd_ctx == nullptr || sd_ctx->sd == nullptr) {
         return false;
     }
-    return sd_ctx->sd->control_net != nullptr;
+    if (sd_ctx->sd->control_net != nullptr) {
+        return true;
+    }
+    // z-image keeps control net weights inside the diffusion runner, registered
+    // under ModelComponent::ControlNet instead of a separate control_net runner.
+    return sd_ctx->sd->model_manager != nullptr &&
+           sd_ctx->sd->model_manager->registered_params_size({ModelComponent::ControlNet}) > 0;
 }
 
 const char* sd_get_model_version_name(const sd_ctx_t* sd_ctx) {
     if (sd_ctx == nullptr || sd_ctx->sd == nullptr || sd_ctx->sd->version >= VERSION_COUNT) {
         return "Unknown";
     }
-    return model_version_to_str[sd_ctx->sd->version];
+    return sd_version_name(sd_ctx->sd->version);
 }
 
 enum sample_method_t sd_get_default_sample_method(const sd_ctx_t* sd_ctx) {
@@ -719,44 +816,62 @@ enum scheduler_t sd_get_default_scheduler(const sd_ctx_t* sd_ctx, enum sample_me
 
 SD_API bool generate_image(sd_ctx_t* sd_ctx,
                            const sd_img_gen_params_t* params,
-                           sd_image_t** images_out,
-                           int* num_images_out) {
-    if (images_out != nullptr)
-        *images_out = nullptr;
-    if (num_images_out != nullptr)
-        *num_images_out = 0;
-    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || params == nullptr) {
+                           sd_image_generation_result_t** result_out) {
+    if (result_out)
+        *result_out = nullptr;
+    if (!result_out || !sd_ctx || !sd_ctx->sd || !params)
+        return false;
+    StableDiffusionGGML::ExecutionScope execution(*sd_ctx->sd);
+    if (!execution.ready)
+        return false;
+    sd_image_t* images = nullptr;
+    int count          = 0;
+    std::vector<nlohmann::json> infos;
+    try {
+        if (!sd::pipeline::generate_image(sd_ctx->sd, params, &images, &count, &infos)) {
+            free_sd_images(images, count);
+            return false;
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("image generation failed: %s", e.what());
+        free_sd_images(images, count);
         return false;
     }
-    StableDiffusionGGML::ExecutionScope execution(*sd_ctx->sd);
-    return execution.ready && sd::pipeline::generate_image(sd_ctx->sd, params, images_out, num_images_out);
+    return sd::make_image_generation_result(images, count, infos, result_out);
 }
 
 SD_API bool generate_video(sd_ctx_t* sd_ctx,
-                           const sd_vid_gen_params_t* sd_vid_gen_params,
-                           sd_image_t** frames_out,
-                           int* num_frames_out,
-                           sd_audio_t** audio_out) {
-    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || sd_vid_gen_params == nullptr) {
+                           const sd_vid_gen_params_t* params,
+                           sd_video_generation_result_t** result_out) {
+    if (result_out)
+        *result_out = nullptr;
+    if (!result_out || !sd_ctx || !sd_ctx->sd || !params)
         return false;
-    }
-
-    if (frames_out != nullptr) {
-        *frames_out = nullptr;
-    }
-    if (audio_out != nullptr) {
-        *audio_out = nullptr;
-    }
-    if (num_frames_out != nullptr) {
-        *num_frames_out = 0;
-    }
-
     StableDiffusionGGML::ExecutionScope execution(*sd_ctx->sd);
-    if (!execution.ready) {
+    if (!execution.ready)
+        return false;
+    auto* result = static_cast<sd_video_generation_result_t*>(calloc(1, sizeof(sd_video_generation_result_t)));
+    if (!result)
+        return false;
+    try {
+        nlohmann::json info;
+        if (!sd::pipeline::generate_video(sd_ctx->sd, params, &result->frames, &result->frame_count,
+                                          &result->audio, &result->fps, &info)) {
+            free_sd_video_generation_result(result);
+            return false;
+        }
+        result->generation_info = sd::copy_generation_info(info);
+        if (!result->generation_info) {
+            free_sd_video_generation_result(result);
+            return false;
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("video generation failed: %s", e.what());
+        free_sd_video_generation_result(result);
         return false;
     }
-
-    return sd::pipeline::generate_video(sd_ctx->sd, sd_vid_gen_params, frames_out, num_frames_out, audio_out);
+    *result_out = result;
+    return true;
 }
 
 SD_API void free_sd_images(sd_image_t* result_images, int num_images) {

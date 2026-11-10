@@ -23,6 +23,8 @@
 #define MAX_PARAMS_TENSOR_NUM 32768
 #define MAX_GRAPH_SIZE 327680
 
+struct GGMLRunnerContext;
+
 struct WeightAdapter {
     struct ForwardParams {
         enum class op_type_t {
@@ -46,31 +48,38 @@ struct WeightAdapter {
             float scale     = 1.f;
         } conv2d;
     };
-    virtual ggml_tensor* patch_weight(ggml_context* ctx, ggml_backend_t backend, ggml_tensor* weight, const std::string& weight_name) = 0;
-    virtual ggml_tensor* forward_with_lora(ggml_context* ctx,
-                                           ggml_backend_t backend,
+
+    virtual ggml_tensor* patch_weight(GGMLRunnerContext* runner_ctx,
+                                      ggml_tensor* weight,
+                                      const std::string& weight_name) = 0;
+
+    virtual ggml_tensor* forward_with_lora(GGMLRunnerContext* runner_ctx,
                                            ggml_tensor* x,
                                            ggml_tensor* w,
                                            ggml_tensor* b,
                                            const std::string& prefix,
-                                           ForwardParams forward_params)                                                              = 0;
-    virtual ggml_tensor* add_lora_to_output(ggml_context* ctx,
-                                            ggml_backend_t backend,
+                                           ForwardParams forward_params) = 0;
+
+    virtual ggml_tensor* add_lora_to_output(GGMLRunnerContext* runner_ctx,
                                             ggml_tensor* x,
                                             ggml_tensor* w,
                                             ggml_tensor* output,
                                             const std::string& prefix,
-                                            ForwardParams forward_params)                                                             = 0;
-    virtual size_t get_extra_graph_size()                                                                                             = 0;
+                                            ForwardParams forward_params) = 0;
+
+    virtual size_t get_extra_graph_size() = 0;
 };
 
 struct GGMLRunnerContext {
     ggml_backend_t backend                                           = nullptr;
     ggml_context* ggml_ctx                                           = nullptr;
+    ggml_cgraph* graph                                               = nullptr;
     bool flash_attn_enabled                                          = false;
+    bool sage_attn_enabled                                           = false;
     float linear_scale                                               = 0.f;
     float attn_scale                                                 = 0.f;
     bool conv2d_direct_enabled                                       = false;
+    bool conv3d_direct_enabled                                       = false;
     bool circular_x_enabled                                          = false;
     bool circular_y_enabled                                          = false;
     ggml_tensor* ip_context                                          = nullptr;
@@ -100,6 +109,12 @@ struct GGMLRunnerContext {
         return get_cache_tensor(name);
     }
 
+    void expand_graph(ggml_tensor* tensor) const {
+        if (graph != nullptr && tensor != nullptr) {
+            ggml_build_forward_expand(graph, tensor);
+        }
+    }
+
     void persist_cache_tensor(const std::string& name, ggml_tensor* tensor) const {
         if (!cache_tensor || tensor == nullptr) {
             return;
@@ -115,27 +130,22 @@ struct GGMLRunnerContext {
     }
 };
 
-ggml_tensor* ggml_ext_attention_ext(GGMLRunnerContext* ctx,
-                                    ggml_tensor* q,
-                                    ggml_tensor* k,
-                                    ggml_tensor* v,
-                                    int64_t n_head,
-                                    ggml_tensor* mask = nullptr,
-                                    bool skip_reshape = false,
-                                    bool flash_attn   = false,
-                                    float kv_scale    = 1.f);
-
 struct GGMLRunner {
 private:
     std::map<ggml_backend_t, size_t> logged_compute_bytes_;
-    size_t logged_segment_count_ = 0;
+    size_t logged_segment_count_     = 0;
+    ggml_status last_compute_status_ = GGML_STATUS_SUCCESS;
 
-    sd::ComputeWorkspace::Measurement measure(ggml_cgraph* graph, size_t direct_bytes);
+    sd::ComputeWorkspace::Measurement measure(ggml_cgraph* graph, const std::unordered_set<const ggml_tensor*>* external_outputs = nullptr);
+
     std::vector<DeviceMemoryRequest> memory_requests(const std::vector<sd::BackendBufferSize>& sizes,
                                                      size_t pending_cache_bytes) const;
+
     bool fits(const std::vector<DeviceMemoryRequest>& requests,
               const std::vector<ggml_tensor*>& params) const;
-    bool execute_segment(ggml_cgraph* graph, int n_threads);
+
+    bool execute_segment(ggml_cgraph* graph, int n_threads, const std::function<void()>& on_before_compute);
+
     std::optional<sd::Tensor<float>> execute_graph(ggml_cgraph* graph, int n_threads, bool no_return, const std::function<bool()>& read_outputs);
 
 protected:
@@ -150,15 +160,15 @@ protected:
     sd::GraphCutTensorCache cut_cache_;
     sd::ComputeWorkspace workspace_;
     ggml_context* compute_ctx = nullptr;
-    bool runner_started_      = false;
-    bool graph_active_        = false;
+    std::unique_ptr<std::max_align_t[]> compute_ctx_buffer_;
+    bool runner_started_ = false;
+    bool graph_active_   = false;
 
     size_t max_graph_vram_bytes        = 0;
     bool graph_cut_layer_split_enabled = false;
     std::vector<size_t> graph_cut_layer_split_backend_vram_limits_;
 
     std::vector<ggml_backend_t> extra_runtime_backends;  // borrowed (SDBackendManager-owned)
-    bool multi_device_eval_callback_warned = false;
 
     std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
     std::weak_ptr<DeviceResidencyManager> residency_manager;
@@ -175,9 +185,11 @@ protected:
     const std::string final_result_name = "ggml_runner_final_result_tensor";
 
     bool flash_attn_enabled    = false;
+    bool sage_attn_enabled     = false;
     float linear_scale         = 0.f;
     float attn_scale           = 0.f;
     bool conv2d_direct_enabled = false;
+    bool conv3d_direct_enabled = false;
     bool circular_x_enabled    = false;
     bool circular_y_enabled    = false;
 
@@ -263,11 +275,9 @@ protected:
 
     void copy_data_to_backend_tensor(ggml_cgraph* gf, bool clear_after_copy = true);
 
-    bool resolve_graph_cut_plan(ggml_cgraph* gf,
-                                GraphCutPlan* plan_out);
+    const GraphCutPlan& resolve_graph_cut_plan(ggml_cgraph* gf);
 
-    bool resolve_graph_cut_layer_split_plan(ggml_cgraph* gf,
-                                            GraphCutPlan* plan_out);
+    const GraphCutPlan& resolve_graph_cut_layer_split_plan(ggml_cgraph* gf);
 
     bool assign_graph_cut_layer_split_backends(ggml_cgraph* gf);
 
@@ -286,7 +296,8 @@ public:
 
     virtual ~GGMLRunner();
 
-    virtual GGMLRunnerContext get_context();
+    // Binding a graph schedules cache outputs at registration instead of graph end.
+    virtual GGMLRunnerContext get_context(ggml_cgraph* graph = nullptr);
 
     void reset_compute_ctx();
 
@@ -321,7 +332,7 @@ public:
 
     ggml_tensor* to_backend(ggml_tensor* tensor);
 
-    void cache(const std::string name, ggml_tensor* tensor);
+    void cache(const std::string name, ggml_tensor* tensor, ggml_cgraph* graph = nullptr);
 
     ggml_tensor* get_cache_tensor_by_name(const std::string& name) {
         return cache_.get(name);
@@ -333,8 +344,18 @@ public:
                                              bool no_return                            = false,
                                              const std::function<bool()>& read_outputs = {});
 
+    ggml_status last_compute_status() const { return last_compute_status_; }
+
     void set_flash_attention_enabled(bool enabled) {
         flash_attn_enabled = enabled;
+    }
+
+    void set_sage_attention_enabled(bool enabled) {
+        if (sage_attn_enabled != enabled) {
+            free_cache_ctx_and_buffer();
+            graph_cut_plan_cache_.graph_cut_plans.clear();
+            sage_attn_enabled = enabled;
+        }
     }
 
     void set_scale_overrides(float linear_scale, float attn_scale) {
@@ -344,6 +365,10 @@ public:
 
     void set_conv2d_direct_enabled(bool enabled) {
         conv2d_direct_enabled = enabled;
+    }
+
+    void set_conv3d_direct_enabled(bool enabled) {
+        conv3d_direct_enabled = enabled;
     }
 
     void set_circular_axes(bool circular_x, bool circular_y) {

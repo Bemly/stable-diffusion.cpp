@@ -143,10 +143,10 @@ namespace SenseNovaU1 {
         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* timesteps) {
             auto mlp_0 = std::dynamic_pointer_cast<Linear>(blocks["mlp.0"]);
             auto mlp_2 = std::dynamic_pointer_cast<Linear>(blocks["mlp.2"]);
-            auto x     = ggml_ext_timestep_embedding(ctx->ggml_ctx,
+            auto x     = ggml_ext_timestep_embedding(ctx,
                                                      timesteps,
                                                      static_cast<int>(frequency_embedding_size),
-                                                     10000.f,
+                                                     10000,
                                                      1.f);
             x          = mlp_0->forward(ctx, x);
             x          = ggml_silu_inplace(ctx->ggml_ctx, x);
@@ -166,8 +166,8 @@ namespace SenseNovaU1 {
         // head axis used by the RoPE kernel: [hidden, 1, tokens, batch].
         x                  = ggml_reshape_4d(ctx->ggml_ctx, x, x->ne[0], 1, x->ne[1], x->ne[2]);
         const int64_t half = x->ne[0] / 2;
-        auto x_part        = ggml_ext_slice(ctx->ggml_ctx, x, 0, 0, half);
-        auto y_part        = ggml_ext_slice(ctx->ggml_ctx, x, 0, half, x->ne[0]);
+        auto x_part        = ggml_ext_slice(ctx, x, 0, 0, half);
+        auto y_part        = ggml_ext_slice(ctx, x, 0, half, x->ne[0]);
         x_part             = ggml_rope_ext(ctx->ggml_ctx,
                                            x_part,
                                            position_x,
@@ -255,10 +255,10 @@ namespace SenseNovaU1 {
         const int64_t h = x->ne[1];
         const int64_t w = x->ne[0];
         GGML_ASSERT(x->ne[2] % (upscale_factor * upscale_factor) == 0);
-        x = ggml_ext_cont(ctx->ggml_ctx,
-                          ggml_ext_torch_permute(ctx->ggml_ctx, x, 2, 0, 1, 3));
+        x = ggml_ext_cont(ctx,
+                          ggml_ext_torch_permute(ctx, x, 2, 0, 1, 3));
         x = ggml_reshape_3d(ctx->ggml_ctx, x, x->ne[0], x->ne[1] * x->ne[2], x->ne[3]);
-        return DiT::unpatchify(ctx->ggml_ctx, x, h, w, upscale_factor, upscale_factor, true);
+        return DiT::unpatchify(ctx, x, h, w, upscale_factor, upscale_factor, true);
     }
 
     struct PixelDecoder : public GGMLBlock {
@@ -352,13 +352,13 @@ namespace SenseNovaU1 {
             const int64_t spatial_dim  = config.head_dim - temporal_dim;
             const int64_t axis_dim     = spatial_dim / 2;
 
-            auto temporal = ggml_ext_slice(ctx->ggml_ctx, x, 0, 0, temporal_dim);
-            auto spatial  = ggml_ext_slice(ctx->ggml_ctx, x, 0, temporal_dim, config.head_dim);
+            auto temporal = ggml_ext_slice(ctx, x, 0, 0, temporal_dim);
+            auto spatial  = ggml_ext_slice(ctx, x, 0, temporal_dim, config.head_dim);
             temporal      = std::dynamic_pointer_cast<LLM::LLMRMSNorm>(blocks[norm_name])->forward(ctx, temporal);
             spatial       = std::dynamic_pointer_cast<LLM::LLMRMSNorm>(blocks[norm_hw_name])->forward(ctx, spatial);
 
-            auto height = ggml_ext_slice(ctx->ggml_ctx, spatial, 0, 0, axis_dim);
-            auto width  = ggml_ext_slice(ctx->ggml_ctx, spatial, 0, axis_dim, spatial_dim);
+            auto height = ggml_ext_slice(ctx, spatial, 0, 0, axis_dim);
+            auto width  = ggml_ext_slice(ctx, spatial, 0, axis_dim, spatial_dim);
             temporal    = apply_axis_rope(ctx,
                                           temporal,
                                           position_t,
@@ -442,27 +442,19 @@ namespace SenseNovaU1 {
                 k = ggml_concat(ctx->ggml_ctx, prefix_k, k, 2);
                 v = ggml_concat(ctx->ggml_ctx, prefix_v, v, 2);
             } else {
-                // Keep dedicated graph outputs alive until the runner copies them
-                // into its persistent cache buffer after graph execution.
-                auto cache_k = ggml_dup_tensor(ctx->ggml_ctx, k);
-                cache_k      = ggml_cpy(ctx->ggml_ctx, k, cache_k);
-                ggml_set_output(cache_k);
-                auto cache_v = ggml_dup_tensor(ctx->ggml_ctx, v);
-                cache_v      = ggml_cpy(ctx->ggml_ctx, v, cache_v);
-                ggml_set_output(cache_v);
-                ctx->persist_cache_tensor(layer_cache + ".k", cache_k);
-                ctx->persist_cache_tensor(layer_cache + ".v", cache_v);
+                ctx->expand_graph(q);
+                ctx->persist_cache_tensor(layer_cache + ".k", k);
+                ctx->persist_cache_tensor(layer_cache + ".v", v);
             }
 
             q = ggml_cont(ctx->ggml_ctx,
-                          ggml_ext_torch_permute(ctx->ggml_ctx, q, 0, 2, 1, 3));
+                          ggml_ext_torch_permute(ctx, q, 0, 2, 1, 3));
             q = ggml_reshape_3d(ctx->ggml_ctx, q, q->ne[0], q->ne[1], q->ne[2] * q->ne[3]);
             k = ggml_cont(ctx->ggml_ctx,
-                          ggml_ext_torch_permute(ctx->ggml_ctx, k, 0, 2, 1, 3));
+                          ggml_ext_torch_permute(ctx, k, 0, 2, 1, 3));
             k = ggml_reshape_3d(ctx->ggml_ctx, k, k->ne[0], k->ne[1], k->ne[2] * k->ne[3]);
 
-            auto out = ggml_ext_attention_ext(ctx->ggml_ctx,
-                                              ctx->backend,
+            auto out = ggml_ext_attention_ext(ctx,
                                               q,
                                               k,
                                               v,
@@ -570,7 +562,7 @@ namespace SenseNovaU1 {
             blocks["language_model.model"]                       = std::make_shared<TextModel>(config);
             blocks["fm_modules.vision_model_mot_gen.embeddings"] = std::make_shared<VisionEmbeddings>(config);
             blocks["fm_modules.timestep_embedder"]               = std::make_shared<TimestepEmbedder>(config.hidden_size,
-                                                                                        config.timestep_embedding_size);
+                                                                                                      config.timestep_embedding_size);
             if (config.add_noise_scale_embedding) {
                 blocks["fm_modules.noise_scale_embedder"] = std::make_shared<TimestepEmbedder>(config.hidden_size,
                                                                                                config.timestep_embedding_size);
@@ -687,7 +679,7 @@ namespace SenseNovaU1 {
             ggml_set_name(attention_mask, "snu15.prefix.attention_mask");
             set_backend_tensor_data(attention_mask, attention_mask_vec.data());
 
-            auto runner_ctx = get_context();
+            auto runner_ctx = get_context(graph);
             auto text_model = model.text_model();
             auto hidden     = text_model->embed(&runner_ctx, ids);
             hidden          = text_model->forward(&runner_ctx,

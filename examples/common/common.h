@@ -1,6 +1,8 @@
 #ifndef __EXAMPLES_COMMON_COMMON_H__
 #define __EXAMPLES_COMMON_COMMON_H__
 
+#include "generation_metadata.h"
+
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -12,11 +14,15 @@
 #include "resource_owners.hpp"
 #include "stable-diffusion.h"
 
+// The command-line argument at `index` as UTF-8 (on Windows, read again from
+// the UTF-16 command line: argv itself is in the ANSI code page).
+std::string argv_to_utf8(int index, const char** argv);
+
 #define SAFE_STR(s) ((s) ? (s) : "")
 #define BOOL_STR(b) ((b) ? "true" : "false")
 
 extern const char* const modes_str[];
-#define SD_ALL_MODES_STR "img_gen, adetailer, vid_gen, convert, upscale, metadata"
+#define SD_ALL_MODES_STR "img_gen, adetailer, vid_gen, convert, upscale, metadata, vid_upscale"
 
 enum SDMode {
     IMG_GEN,
@@ -25,6 +31,7 @@ enum SDMode {
     CONVERT,
     UPSCALE,
     METADATA,
+    VID_UPSCALE,
     MODE_COUNT
 };
 
@@ -116,7 +123,8 @@ bool decode_base64_image(const std::string& encoded_input,
                          SDImageOwner& out_image);
 
 struct SDContextParams {
-    int n_threads = -1;
+    int n_threads               = -1;
+    int conditioning_cache_size = 4;
     std::string model_path;
     std::string clip_l_path;
     std::string clip_g_path;
@@ -124,6 +132,7 @@ struct SDContextParams {
     std::string t5xxl_path;
     std::string llm_path;
     std::string llm_vision_path;
+    std::string tokenizer;
     std::string diffusion_model_path;
     std::string high_noise_diffusion_model_path;
     std::string uncond_diffusion_model_path;
@@ -131,6 +140,7 @@ struct SDContextParams {
     std::string vae_path;
     std::string vae_format = "auto";
     std::string audio_vae_path;
+    std::string audio_encoder_path;
     std::string taesd_path;
     std::string esrgan_path;
     std::string control_net_path;
@@ -154,22 +164,26 @@ struct SDContextParams {
     bool disable_prefetch          = false;
     bool disable_segmented_compute = false;
     bool eager_load                = false;
+    bool batched_cfg               = true;
     std::string backend;
     std::string params_backend;
     std::string split_mode;
     std::string model_args;
     bool auto_fit = true;
     std::string rpc_servers;
+    bool list_devices = false;
     std::string effective_backend;
     std::string effective_params_backend;
-    bool enable_mmap           = false;
-    bool control_net_cpu       = false;
-    bool clip_on_cpu           = false;
-    bool vae_on_cpu            = false;
-    bool flash_attn            = false;
-    bool diffusion_flash_attn  = false;
+    bool enable_mmap            = false;
+    bool control_net_cpu        = false;
+    bool clip_on_cpu            = false;
+    bool vae_on_cpu             = false;
+    std::string flash_attn_mode = "auto";
+    std::string conv_direct_mode;  // Empty selects auto while honoring legacy convolution flags.
+    bool sage_attn             = false;
     bool diffusion_conv_direct = false;
     bool vae_conv_direct       = false;
+    bool taesd_preview_only    = false;
 
     prediction_t prediction           = PREDICTION_COUNT;
     lora_apply_mode_t lora_apply_mode = LORA_APPLY_AUTO;
@@ -180,13 +194,14 @@ struct SDContextParams {
 
     float flow_shift = INFINITY;
     ArgOptions get_options();
+    bool print_devices() const;
     void build_embedding_map();
     void prepare_backend_assignments();
     bool resolve(SDMode mode);
     bool validate(SDMode mode);
     bool resolve_and_validate(SDMode mode);
     std::string to_string() const;
-    sd_ctx_params_t to_sd_ctx_params_t(bool taesd_preview);
+    sd_ctx_params_t to_sd_ctx_params_t();
 };
 
 struct SDGenerationParams {
@@ -197,23 +212,23 @@ struct SDGenerationParams {
     std::string ad_prompt;
     std::string ad_negative_prompt;
     std::string extra_ad_args;
-    int clip_skip              = -1;  // <= 0 represents unspecified
-    int width                  = -1;
-    int height                 = -1;
-    int batch_count            = 1;
-    int qwen_image_layers      = 3;
-    int64_t seed               = 42;
-    float strength             = 0.75f;
-    float control_strength     = 0.9f;
-    float ip_adapter_strength  = 1.0f;
-    bool auto_resize_ref_image = true;
-    bool increase_ref_index    = false;
-    bool embed_image_metadata  = true;
+    int clip_skip             = -1;  // <= 0 represents unspecified
+    int width                 = -1;
+    int height                = -1;
+    int batch_count           = 1;
+    int qwen_image_layers     = 3;
+    int64_t seed              = 42;
+    float strength            = 0.75f;
+    float control_strength    = 0.9f;
+    float ip_adapter_strength = 1.0f;
+    bool increase_ref_index   = false;
+    bool embed_image_metadata = true;
 
     std::string init_image_path;
     std::string end_image_path;
     std::string mask_image_path;
     std::string control_image_path;
+    std::string control_type;
     std::string ip_adapter_image_path;
     std::vector<std::string> ref_image_paths;
     std::vector<std::string> ref_video_paths;
@@ -244,6 +259,7 @@ struct SDGenerationParams {
     std::string extra_tiling_args;
 
     std::string ref_image_args;
+    std::string image_preprocess;
 
     std::string pm_id_images_dir;
     std::string pm_id_embed_path;
@@ -277,6 +293,7 @@ struct SDGenerationParams {
     std::string prompt_with_lora;  // for metadata record only
     std::vector<sd_lora_t> lora_vec;
     sd_hires_upscaler_t resolved_hires_upscaler;
+    sd_control_type_t resolved_control_type = SD_CONTROL_TYPE_NONE;
 
     // Owned execution payload.
     SDImageOwner init_image;
@@ -307,13 +324,14 @@ struct SDGenerationParams {
     ArgOptions get_options();
     bool from_json_str(const std::string& json_str,
                        const std::function<std::string(const std::string&)>& lora_path_resolver = {});
+    bool parse_image_preprocess_json(const std::string& json_str);
     bool initialize_cache_params();
-    void extract_and_remove_lora(const std::string& lora_model_dir);
+    bool extract_and_remove_lora(const std::string& lora_model_dir);
     bool width_and_height_are_set() const;
     void set_width_and_height_if_unset(int w, int h);
     int get_resolved_width() const;
     int get_resolved_height() const;
-    bool resolve(const std::string& lora_model_dir, const std::string& hires_upscalers_dir, bool strict = false);
+    bool resolve(const std::string& lora_model_dir, const std::string& hires_upscalers_dir, bool strict = false, bool validate_missing_loras = false);
     bool validate(SDMode mode);
     bool resolve_and_validate(SDMode mode,
                               const std::string& lora_model_dir,
@@ -325,13 +343,4 @@ struct SDGenerationParams {
 };
 
 std::string version_string();
-std::string build_sdcpp_image_metadata_json(const SDContextParams& ctx_params,
-                                            const SDGenerationParams& gen_params,
-                                            int64_t seed,
-                                            SDMode mode = IMG_GEN);
-std::string get_image_params(const SDContextParams& ctx_params,
-                             const SDGenerationParams& gen_params,
-                             int64_t seed,
-                             SDMode mode = IMG_GEN);
-
 #endif  // __EXAMPLES_COMMON_COMMON_H__

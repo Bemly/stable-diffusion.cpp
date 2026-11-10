@@ -17,9 +17,11 @@
 #define CUBLAS_OP_T HIPBLAS_OP_T
 #define CUBLAS_STATUS_SUCCESS HIPBLAS_STATUS_SUCCESS
 #define CUBLAS_TF32_TENSOR_OP_MATH 0
+#define CUDA_R_8I   HIPBLAS_R_8I
 #define CUDA_R_16F  HIPBLAS_R_16F
 #define CUDA_R_16BF HIPBLAS_R_16B
 #define CUDA_R_32F  HIPBLAS_R_32F
+#define CUDA_R_32I  HIPBLAS_R_32I
 #define CUBLAS_SIDE_RIGHT HIPBLAS_SIDE_RIGHT
 #define CUBLAS_FILL_MODE_UPPER HIPBLAS_FILL_MODE_UPPER
 #define CUBLAS_DIAG_NON_UNIT HIPBLAS_DIAG_NON_UNIT
@@ -58,11 +60,13 @@
 #define cudaDeviceSynchronize hipDeviceSynchronize
 #define cudaError_t hipError_t
 #define cudaErrorMemoryAllocation hipErrorOutOfMemory
+#define cudaErrorNotReady hipErrorNotReady
 #define cudaErrorPeerAccessAlreadyEnabled hipErrorPeerAccessAlreadyEnabled
 #define cudaErrorPeerAccessNotEnabled hipErrorPeerAccessNotEnabled
 #define cudaEventCreateWithFlags hipEventCreateWithFlags
 #define cudaEventDisableTiming hipEventDisableTiming
 #define cudaEventRecord hipEventRecord
+#define cudaEventQuery hipEventQuery
 #define cudaEventSynchronize hipEventSynchronize
 #define cudaEvent_t hipEvent_t
 #define cudaEventDestroy hipEventDestroy
@@ -73,6 +77,10 @@
 #define cudaGetDeviceProperties hipGetDeviceProperties
 #define cudaGetErrorString hipGetErrorString
 #define cudaGetLastError hipGetLastError
+#define cudaHostAlloc hipHostMalloc
+#define cudaHostAllocPortable hipHostMallocPortable
+#define cudaHostAllocMapped hipHostMallocMapped
+#define cudaHostGetDevicePointer hipHostGetDevicePointer
 #define cudaHostRegister hipHostRegister
 #define cudaHostRegisterPortable hipHostRegisterPortable
 #define cudaHostRegisterReadOnly hipHostRegisterReadOnly
@@ -105,6 +113,7 @@
 #define cuMemRelease hipMemRelease
 #define CUmemGenericAllocationHandle hipMemGenericAllocationHandle_t
 #define cuMemCreate hipMemCreate
+#define CUDA_ERROR_OUT_OF_MEMORY hipErrorOutOfMemory
 #define cuMemAddressReserve hipMemAddressReserve
 #define cuMemMap hipMemMap
 #define cuMemSetAccess hipMemSetAccess
@@ -159,12 +168,14 @@
 #if HIP_VERSION >= 60500000
 #define CUBLAS_COMPUTE_16F HIPBLAS_COMPUTE_16F
 #define CUBLAS_COMPUTE_32F HIPBLAS_COMPUTE_32F
+#define CUBLAS_COMPUTE_32I HIPBLAS_COMPUTE_32I
 #define CUBLAS_COMPUTE_32F_FAST_16F HIPBLAS_COMPUTE_32F_FAST_16F
 #define cublasComputeType_t hipblasComputeType_t
 #define cudaDataType_t hipDataType
 #else
 #define CUBLAS_COMPUTE_16F HIPBLAS_R_16F
 #define CUBLAS_COMPUTE_32F HIPBLAS_R_32F
+#define CUBLAS_COMPUTE_32I HIPBLAS_R_32I
 #define CUBLAS_COMPUTE_32F_FAST_16F HIPBLAS_R_32F
 #define cublasComputeType_t hipblasDatatype_t
 #define cudaDataType_t hipblasDatatype_t
@@ -176,9 +187,9 @@
 
 #define __CUDA_ARCH__ 1300
 
-#if defined(__gfx900__) || defined(__gfx906__)
+#if defined(__gfx900__) || defined(__gfx906__) || defined(__gfx909__) || defined(__gfx90c__)
 #define GCN5
-#endif // defined(__gfx900__) || defined(__gfx906__)
+#endif // defined(__gfx900__) || defined(__gfx906__) || defined(__gfx909__) || defined(__gfx90c__)
 
 #if defined(__gfx803__)
 #define GCN4
@@ -244,11 +255,11 @@
 typedef __hip_bfloat16 nv_bfloat16;
 typedef __hip_bfloat162 nv_bfloat162;
 
-#if HIP_VERSION >= 60200000
+#if HIP_VERSION >= 60300000
 #include <hip/hip_fp8.h>
 typedef __hip_fp8_e4m3 __nv_fp8_e4m3;
 #define FP8_AVAILABLE
-#endif // HIP_VERSION >= 60200000
+#endif // HIP_VERSION >= 60300000
 
 typedef int8_t int8x4_t __attribute__((ext_vector_type(4)));
 typedef uint8_t uint8x4_t __attribute__((ext_vector_type(4)));
@@ -273,7 +284,15 @@ static __device__ __forceinline__ int __vsubss4(const int a, const int b) {
 }
 
 static __device__ __forceinline__ int __vsub4(const int a, const int b) {
-    return __vsubss4(a, b);
+    // do some small modifications to a and b to make the subtraction not underflow
+    const unsigned int a_large = a | 0x80808080;
+    const unsigned int b_small = b & 0x7f7f7f7f;
+    const unsigned int result_low_7bits = a_large - b_small;
+
+    // if two ops share the same high bit, we should flip the high bit of the result
+    const unsigned int should_flip_high_1bit = (a ^ ~b) & 0x80808080;
+
+    return result_low_7bits ^ should_flip_high_1bit;
 }
 
 static __device__ __forceinline__ unsigned int __vcmpeq4(unsigned int a, unsigned int b) {
@@ -289,13 +308,13 @@ static __device__ __forceinline__ unsigned int __vcmpeq4(unsigned int a, unsigne
 }
 
 static __device__ __forceinline__ unsigned int __vcmpne4(unsigned int a, unsigned int b) {
-    const uint8x4_t& va = reinterpret_cast<const uint8x4_t&>(a);
-    const uint8x4_t& vb = reinterpret_cast<const uint8x4_t&>(b);
-    unsigned int c;
-    uint8x4_t& vc = reinterpret_cast<uint8x4_t&>(c);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        vc[i] = va[i] == vb[i] ? 0x00 : 0xff;
-    }
-    return c;
+    const unsigned int x = a ^ b;
+
+    // any non-equal bit in a byte will set the high bit of that byte here
+    // the addition will not overflow in the byte as op1 and op2 are both less than 0x80
+    const unsigned int ne_low_7bits = ((x & 0x7f7f7f7f) + 0x7f7f7f7f) & 0x80808080;
+    const unsigned int ne_high_1bit = x & 0x80808080;
+    const unsigned int ne_any_bit = ne_low_7bits | ne_high_1bit;
+
+    return (ne_any_bit >> 7) * 0xff;
 }

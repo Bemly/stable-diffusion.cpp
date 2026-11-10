@@ -11,7 +11,7 @@ void Qwen2Tokenizer::load_from_merges(const std::string& merges_utf8_str) {
     }
 
     std::vector<std::u32string> merges = split_utf32(merges_utf8_str);
-    LOG_VERBOSE("merges size %zu", merges.size());
+    LOG_DEBUG("merges size %zu", merges.size());
     std::vector<std::pair<std::u32string, std::u32string>> merge_pairs;
     for (const auto& merge : merges) {
         size_t space_pos = merge.find(' ');
@@ -36,7 +36,7 @@ void Qwen2Tokenizer::load_from_merges(const std::string& merges_utf8_str) {
         i++;
     }
     encoder_len = i;
-    LOG_VERBOSE("vocab size: %d", encoder_len);
+    LOG_DEBUG("vocab size: %d", encoder_len);
 
     int rank = 0;
     for (const auto& merge : merge_pairs) {
@@ -87,7 +87,8 @@ Qwen2Tokenizer::Qwen2Tokenizer(const std::string& merges_utf8_str)
 }
 
 Qwen2Tokenizer::Qwen2Tokenizer(const std::string& merges_utf8_str,
-                               const std::vector<std::string>& special_tokens_override) {
+                               const std::vector<std::string>& special_tokens_override)
+    : BPETokenizer(R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)") {
     UNK_TOKEN = "<|endoftext|>";
     EOS_TOKEN = "<|endoftext|>";
     PAD_TOKEN = "<|endoftext|>";

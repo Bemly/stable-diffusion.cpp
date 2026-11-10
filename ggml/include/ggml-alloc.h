@@ -49,6 +49,15 @@ GGML_API ggml_gallocr_t ggml_gallocr_new(ggml_backend_buffer_type_t buft);
 GGML_API ggml_gallocr_t ggml_gallocr_new_n(ggml_backend_buffer_type_t * bufts, int n_bufs);
 GGML_API void           ggml_gallocr_free(ggml_gallocr_t galloc);
 
+// Replace the set of fused intermediates that need no storage (count = 0 clears it).
+// The caller must retain all external inputs until the fused output is computed and
+// exclude tensors whose storage is used by an output or any unfused operation.
+// Tensor metadata and graph edges are preserved; skipped tensors are not initialized.
+// Tensors must be unallocated and have neither INPUT nor OUTPUT flags. The set is copied.
+// Set this for each graph before reserve/alloc_graph, including rebuilt graphs.
+GGML_API void ggml_gallocr_set_skipped_tensors(
+    ggml_gallocr_t galloc, struct ggml_tensor * const * tensors, size_t count);
+
 // pre-allocate buffers from a measure graph - does not allocate or modify the graph
 // call with a worst-case graph to avoid buffer reallocations
 // not strictly required for single buffer usage: ggml_gallocr_alloc_graph will reallocate the buffers automatically if needed
@@ -75,9 +84,10 @@ GGML_API size_t ggml_gallocr_get_buffer_size(ggml_gallocr_t galloc, int buffer_i
 
 // Utils
 // Create a buffer and allocate all the tensors in a ggml_context
-// ggml_backend_alloc_ctx_tensors_from_buft_size returns the size of the buffer that would be allocated by ggml_backend_alloc_ctx_tensors_from_buft
-// ggml_backend_alloc_ctx_tensors_from_buft returns NULL on failure or if all tensors in ctx are already allocated or zero-sized
+
+// returns the size of the buffer that would be allocated by ggml_backend_alloc_ctx_tensors_from_buft. returns 0 on failure
 GGML_API size_t                       ggml_backend_alloc_ctx_tensors_from_buft_size(struct ggml_context * ctx, ggml_backend_buffer_type_t buft);
+// returns NULL on failure or if all tensors in ctx are already allocated or zero-sized
 GGML_API struct ggml_backend_buffer * ggml_backend_alloc_ctx_tensors_from_buft(struct ggml_context * ctx, ggml_backend_buffer_type_t buft);
 GGML_API struct ggml_backend_buffer * ggml_backend_alloc_ctx_tensors(struct ggml_context * ctx, ggml_backend_t backend);
 

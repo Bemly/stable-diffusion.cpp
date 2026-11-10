@@ -216,7 +216,7 @@ protected:
     }
 
     ggml_tensor* get_alpha(GGMLRunnerContext* ctx) {
-        auto mix_factor = ggml_ext_cast_f32(ctx->ggml_ctx, ctx->backend, params["mix_factor"]);
+        auto mix_factor = ggml_ext_cast_f32(ctx, params["mix_factor"]);
         return ggml_sigmoid(ctx->ggml_ctx, mix_factor);
     }
 
@@ -544,7 +544,7 @@ public:
                        const String2TensorStorage& tensor_storage_map = {},
                        const std::string& prefix                      = "")
         : version(version), decode_only(decode_only), use_video_decoder(use_video_decoder) {
-        if (sd_version_is_dit(version)) {
+        if (sd_version_is_dit(version) && version != VERSION_PIXART) {
             if (sd_version_uses_flux2_vae(version)) {
                 dd_config.z_channels = 32;
                 embed_dim            = 32;
@@ -601,11 +601,11 @@ public:
             int64_t H = h * p;
             int64_t W = w * p;
 
-            z = ggml_reshape_4d(ctx->ggml_ctx, z, w * h, p * p, C, N);                           // [N, C, p*p, h*w]
-            z = ggml_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, z, 1, 0, 2, 3));  // [N, C, h*w, p*p]
-            z = ggml_reshape_4d(ctx->ggml_ctx, z, p, p, w, h * C * N);                           // [N*C*h, w, p, p]
-            z = ggml_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, z, 0, 2, 1, 3));  // [N*C*h, p, w, p]
-            z = ggml_reshape_4d(ctx->ggml_ctx, z, W, H, C, N);                                   // [N, C, h*p, w*p]
+            z = ggml_reshape_4d(ctx->ggml_ctx, z, w * h, p * p, C, N);                 // [N, C, p*p, h*w]
+            z = ggml_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx, z, 1, 0, 2, 3));  // [N, C, h*w, p*p]
+            z = ggml_reshape_4d(ctx->ggml_ctx, z, p, p, w, h * C * N);                 // [N*C*h, w, p, p]
+            z = ggml_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx, z, 0, 2, 1, 3));  // [N*C*h, p, w, p]
+            z = ggml_reshape_4d(ctx->ggml_ctx, z, W, H, C, N);                         // [N, C, h*p, w*p]
         }
 
         if (use_quant) {
@@ -632,7 +632,7 @@ public:
             // sd::ggml_graph_cut::mark_graph_cut(z, "vae.encode.final", "z");
         }
         if (sd_version_uses_flux2_vae(version)) {
-            z = ggml_ext_chunk(ctx->ggml_ctx, z, 2, 2)[0];
+            z = ggml_ext_chunk(ctx, z, 2, 2)[0];
 
             // [N, C, H, W] -> [N, C*p*p, H/p, W/p]
             int64_t p = 2;
@@ -678,7 +678,7 @@ struct AutoEncoderKL : public VAE {
         if (sd_version_is_sd1(version) || sd_version_is_sd2(version)) {
             scale_factor = 0.18215f;
             shift_factor = 0.f;
-        } else if (sd_version_is_sdxl(version)) {
+        } else if (sd_version_is_sdxl(version) || sd_version_is_pixart(version)) {
             scale_factor = 0.13025f;
             shift_factor = 0.f;
         } else if (sd_version_is_sd3(version)) {
