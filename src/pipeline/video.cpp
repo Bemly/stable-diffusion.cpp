@@ -2197,6 +2197,10 @@ namespace sd::pipeline {
         int64_t latent_end = ggml_time_ms();
         LOG_INFO("generating latent video completed, taking %.2fs", (latent_end - latent_start) * 1.0f / 1000);
 
+        // every sampling pass is done here, including the LTX upscale refine above, so give
+        // the decoder the room the sampler is holding
+        sd->release_diffusion_weights();
+
         sd_audio_t* generated_audio = nullptr;
         if (sd->version == VERSION_WAN2_2_S2V && sd_vid_gen_params->ref_audios_count > 0) {
             // Return the driving track for muxing with the generated video.

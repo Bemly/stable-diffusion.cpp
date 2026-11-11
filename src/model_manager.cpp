@@ -1253,7 +1253,8 @@ void ModelManager::free_params_storage_block(ParamsStorageBlock& block) {
 }
 
 void ModelManager::release_params_storage_blocks(bool force,
-                                                 const std::unordered_set<TensorState*>* target_states) {
+                                                 const std::unordered_set<TensorState*>* target_states,
+                                                 bool allow_resident) {
     struct ReleaseStats {
         size_t bytes   = 0;
         size_t tensors = 0;
@@ -1266,7 +1267,7 @@ void ModelManager::release_params_storage_blocks(bool force,
         if (!can_release) {
             can_release = std::all_of(block->states.begin(),
                                       block->states.end(),
-                                      [target_states](TensorState* state) {
+                                      [target_states, allow_resident](TensorState* state) {
                                           if (state == nullptr) {
                                               return true;
                                           }
@@ -1276,7 +1277,8 @@ void ModelManager::release_params_storage_blocks(bool force,
                                           }
                                           return state->pin_count == 0 &&
                                                  !state->staged_to_compute_backend &&
-                                                 state->residency_mode == ResidencyMode::Disk;
+                                                 (allow_resident ||
+                                                  state->residency_mode == ResidencyMode::Disk);
                                       });
         }
 
@@ -1626,6 +1628,20 @@ void ModelManager::finish_compute_backend_usage(const std::vector<TensorState*>&
             state->pin_count--;
         }
     }
+}
+
+void ModelManager::unload_component(ModelComponent component) {
+    std::unordered_set<TensorState*> target_states;
+    for (const auto& state : tensor_states_) {
+        if (state != nullptr && state->component == component) {
+            target_states.insert(state.get());
+        }
+    }
+    if (target_states.empty()) {
+        return;
+    }
+    release_compute_staging_blocks(false, &target_states);
+    release_params_storage_blocks(false, &target_states, true);
 }
 
 void ModelManager::release_compute_backend_params(const std::vector<ggml_tensor*>& tensors) {

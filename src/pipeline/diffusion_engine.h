@@ -115,6 +115,9 @@ public:
 
     std::shared_ptr<ModelManager> model_manager;
 
+    // Hand back the video memory the sampler's weights hold, once no sampling pass is left.
+    void release_diffusion_weights();
+
     enum class RunnerGroup { Core,
                              VAE,
                              ControlNet,

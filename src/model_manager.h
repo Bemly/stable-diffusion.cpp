@@ -168,7 +168,8 @@ private:
     void release_compute_staging_blocks(bool force                                            = false,
                                         const std::unordered_set<TensorState*>* target_states = nullptr);
     void release_params_storage_blocks(bool force                                            = false,
-                                       const std::unordered_set<TensorState*>* target_states = nullptr);
+                                       const std::unordered_set<TensorState*>* target_states = nullptr,
+                                       bool allow_resident                                   = false);
     void free_compute_staging_block(ComputeStagingBlock& block);
     void free_params_storage_block(ParamsStorageBlock& block);
     void erase_params_storage_block(ParamsStorageBlock* block);
@@ -279,6 +280,10 @@ public:
     bool segmented_compute_enabled() const override { return !segmented_compute_disabled_; }
     bool prefetch_enabled() const override { return !prefetch_disabled_; }
     void release_compute_backend_params(const std::vector<ggml_tensor*>& tensors) override;
+
+    // hand back the video memory a component's weights hold, even when they are resident
+    // rather than streamed from disk. The caller has to know the component is done.
+    void unload_component(ModelComponent component);
     void evict_compute_backend_params(const std::vector<ggml_tensor*>& tensors) override;
     WeightResidencyInfo inspect_compute_backend_params(
         const std::vector<ggml_tensor*>& tensors) const override;

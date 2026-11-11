@@ -165,6 +165,23 @@ void StableDiffusionGGML::end_runners() {
             lora.model->runner_end();
 }
 
+// The sampler keeps the diffusion weights in video memory until the run ends, and the decoder
+// then has to fit next to them: on a 12 GB card a 4 GB transformer leaves under 2 GB and the
+// VAE decode fails. Only call this once no sampling pass is left.
+void StableDiffusionGGML::release_diffusion_weights() {
+    if (model_manager == nullptr) {
+        return;
+    }
+    // by component: a finished runner cannot always list its own parameters
+    for (const std::shared_ptr<DiffusionModelRunner>& runner : {diffusion_model, high_noise_diffusion_model}) {
+        if (runner != nullptr) {
+            runner->runner_end();
+        }
+    }
+    model_manager->unload_component(ModelComponent::Diffusion);
+    model_manager->unload_component(ModelComponent::HighNoiseDiffusion);
+}
+
 bool StableDiffusionGGML::reset_runners(const RunnerGroups& groups) {
     conditioning_cache_->clear();
     conditioning_loras_.clear();

@@ -1178,6 +1178,10 @@ namespace sd::pipeline {
             final_latents = std::move(hires_final_latents);
         }
 
+        // every sampling pass is done here, including the hires refine above, so give the
+        // decoder the room the sampler is holding
+        sd->release_diffusion_weights();
+
         int num_images = 0;
         auto result    = decode_image_outputs(sd, request, final_latents, &num_images);
         if (result == nullptr) {
