@@ -770,14 +770,21 @@ SDVersion ModelLoader::get_sd_version() const {
     return VERSION_COUNT;
 }
 
+// The type a tensor will actually be loaded as: an override wins over the type
+// the file stores it in, so the reported stats match what runs.
+static ggml_type effective_wtype(const TensorStorage& tensor_storage) {
+    return tensor_storage.expected_type != GGML_TYPE_COUNT ? tensor_storage.expected_type
+                                                           : tensor_storage.type;
+}
+
 std::map<ggml_type, uint32_t> ModelLoader::get_wtype_stat() const {
     std::map<ggml_type, uint32_t> wtype_stat;
     for (auto& [name, tensor_storage] : tensor_storage_map) {
-        auto iter = wtype_stat.find(tensor_storage.type);
+        auto iter = wtype_stat.find(effective_wtype(tensor_storage));
         if (iter != wtype_stat.end()) {
             iter->second++;
         } else {
-            wtype_stat[tensor_storage.type] = 1;
+            wtype_stat[effective_wtype(tensor_storage)] = 1;
         }
     }
     return wtype_stat;
@@ -793,11 +800,11 @@ std::map<ggml_type, uint32_t> ModelLoader::get_conditioner_wtype_stat() const {
             continue;
         }
 
-        auto iter = wtype_stat.find(tensor_storage.type);
+        auto iter = wtype_stat.find(effective_wtype(tensor_storage));
         if (iter != wtype_stat.end()) {
             iter->second++;
         } else {
-            wtype_stat[tensor_storage.type] = 1;
+            wtype_stat[effective_wtype(tensor_storage)] = 1;
         }
     }
     return wtype_stat;
@@ -810,11 +817,11 @@ std::map<ggml_type, uint32_t> ModelLoader::get_diffusion_model_wtype_stat() cons
             continue;
         }
 
-        auto iter = wtype_stat.find(tensor_storage.type);
+        auto iter = wtype_stat.find(effective_wtype(tensor_storage));
         if (iter != wtype_stat.end()) {
             iter->second++;
         } else {
-            wtype_stat[tensor_storage.type] = 1;
+            wtype_stat[effective_wtype(tensor_storage)] = 1;
         }
     }
     return wtype_stat;
@@ -828,11 +835,11 @@ std::map<ggml_type, uint32_t> ModelLoader::get_vae_wtype_stat() const {
             continue;
         }
 
-        auto iter = wtype_stat.find(tensor_storage.type);
+        auto iter = wtype_stat.find(effective_wtype(tensor_storage));
         if (iter != wtype_stat.end()) {
             iter->second++;
         } else {
-            wtype_stat[tensor_storage.type] = 1;
+            wtype_stat[effective_wtype(tensor_storage)] = 1;
         }
     }
     return wtype_stat;
@@ -897,6 +904,22 @@ void ModelLoader::set_wtype_override(ggml_type wtype, std::string tensor_type_ru
     }
     invalidate_file_data();
     ++revision_;
+}
+
+// Convert every bf16 tensor to `dst_type`, ignoring the name exclusions of
+// tensor_should_be_converted: those keep norms, biases and embeddings at the
+// file's own type, which on a backend without bf16 means the load aborts.
+// Returns how many tensors were retyped.
+size_t ModelLoader::override_unsupported_bf16(ggml_type dst_type) {
+    size_t count = 0;
+    for (auto& [name, tensor_storage] : tensor_storage_map) {
+        if (tensor_storage.type != GGML_TYPE_BF16) {
+            continue;
+        }
+        tensor_storage.expected_type = dst_type;
+        count++;
+    }
+    return count;
 }
 
 void ModelLoader::process_model_files(bool enable_mmap, bool writable_mmap) {

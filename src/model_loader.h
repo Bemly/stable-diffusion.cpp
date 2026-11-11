@@ -129,6 +129,7 @@ public:
     const std::map<std::string, std::string>& get_metadata() const { return metadata_; }
     void set_n_threads(int n_threads);
     void set_wtype_override(ggml_type wtype, std::string tensor_type_rules = "");
+    size_t override_unsupported_bf16(ggml_type dst_type);
     void process_model_files(bool enable_mmap = false, bool writable_mmap = true);
     std::vector<MmapTensorStore> mmap_tensors(std::map<std::string, ggml_tensor*>& tensors,
                                               std::set<std::string> ignore_tensors = {},

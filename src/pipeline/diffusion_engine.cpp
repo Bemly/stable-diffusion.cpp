@@ -1014,6 +1014,30 @@ bool StableDiffusionGGML::init(const sd_ctx_params_t* sd_ctx_params) {
             return false;
         }
     }
+    // bf16 weights on a Metal device without the bfloat feature: every op that
+    // touches them is rejected, and the weight is already placed in the device
+    // buffer, so the load aborts instead of falling back. f16 keeps the same
+    // footprint; SD_BF16_PROMOTE_F32 trades 2 bytes per weight for the full
+    // exponent range if a model ever needs it.
+    {
+        const SDBackendModule modules[] = {SDBackendModule::DIFFUSION, SDBackendModule::TE,
+                                           SDBackendModule::CLIP_VISION, SDBackendModule::VAE,
+                                           SDBackendModule::CONTROL_NET};
+        bool bf16_supported = true;
+        for (SDBackendModule module : modules) {
+            for (ggml_backend_t backend : backend_manager.runtime_backends(module)) {
+                bf16_supported = bf16_supported && sd_backend_supports_bf16(backend);
+            }
+        }
+        if (!bf16_supported) {
+            ggml_type dst = getenv("SD_BF16_PROMOTE_F32") ? GGML_TYPE_F32 : GGML_TYPE_F16;
+            size_t n      = model_loader.override_unsupported_bf16(dst);
+            if (n > 0) {
+                LOG_INFO("device has no bfloat: converting %zu bf16 tensors to %s on load",
+                         n, ggml_type_name(dst));
+            }
+        }
+    }
     if (eager_load && graph_cut_layer_split_active()) {
         LOG_WARN("--eager-load is not supported with graph-cut layer split; weights will be prepared lazily");
         eager_load = false;

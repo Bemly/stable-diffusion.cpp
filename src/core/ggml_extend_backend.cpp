@@ -443,6 +443,39 @@ static ggml_backend_t init_named_backend(const std::string& name) {
     return ggml_backend_init_by_name(resolved.c_str(), nullptr);
 }
 
+// Whether the device behind this backend can run bf16 weights. Metal on cards
+// without the bfloat feature rejects every op that touches bf16, and a weight it
+// cannot place aborts the whole load, so the loader converts them up front.
+bool sd_backend_supports_bf16(ggml_backend_t backend) {
+    if (backend == nullptr) {
+        return true;
+    }
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    if (dev == nullptr) {
+        return true;
+    }
+
+    // A matmul of bf16 weights against f32 activations: the shape every diffusion
+    // model runs its bf16 tensors through.
+    ggml_init_params params = {
+        /*.mem_size   =*/ggml_tensor_overhead() * 8,
+        /*.mem_buffer =*/nullptr,
+        /*.no_alloc   =*/true,
+    };
+    ggml_context* ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        return true;
+    }
+
+    ggml_tensor* weight = ggml_new_tensor_2d(ctx, GGML_TYPE_BF16, 64, 64);
+    ggml_tensor* input  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 1);
+    ggml_tensor* out    = ggml_mul_mat(ctx, weight, input);
+    bool supported      = ggml_backend_dev_supports_op(dev, out);
+    ggml_free(ctx);
+
+    return supported;
+}
+
 bool sd_backend_is_cpu(ggml_backend_t backend) {
     if (backend == nullptr) {
         return false;
