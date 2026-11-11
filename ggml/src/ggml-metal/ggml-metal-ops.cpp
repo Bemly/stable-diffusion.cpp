@@ -2586,6 +2586,99 @@ static int ggml_metal_op_mul_mat_mv(ggml_metal_op_t ctx, int idx) {
     return 1;
 }
 
+// Blocked mul_mat for devices without simdgroup_matrix (AMD RDNA2 etc.), where
+// kernel_mul_mm cannot run and every batched matmul falls back to kernel_mul_mv.
+// Only the shapes that actually re-read the weights there are routed here.
+static bool ggml_metal_mul_mm_amd_supported(const ggml_tensor * op, const ggml_metal_device_props * props) {
+    if (props->has_simdgroup_mm) {
+        return false;
+    }
+
+    // BM=64, BN=128, BK=32 fp32 staging
+    if (props->max_theadgroup_memory_size < sizeof(float)*(64*32 + 32*132)) {
+        return false;
+    }
+
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * src1 = op->src[1];
+
+    if (src1->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (src0->type != GGML_TYPE_Q8_0 && src0->type != GGML_TYPE_F16) {
+        return false;
+    }
+    if (ggml_is_transposed(src0) || ggml_is_transposed(src1)) {
+        return false;
+    }
+    if (src0->ne[0] % 32 != 0 || src1->nb[0] != sizeof(float)) {
+        return false;
+    }
+    if (src0->ne[1] < 2 || src1->ne[1] <= 8) {
+        return false;
+    }
+    if (src1->ne[2] % src0->ne[2] != 0 || src1->ne[3] % src0->ne[3] != 0) {
+        return false;
+    }
+    if (src1->ne[2] > INT32_MAX || src1->ne[3] > INT32_MAX || src1->ne[1] > INT32_MAX || src0->ne[1] > INT32_MAX) {
+        return false;
+    }
+
+    return true;
+}
+
+static int ggml_metal_op_mul_mat_amd(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    GGML_TENSOR_LOCALS( int32_t, ne0, op->src[0], ne);
+    GGML_TENSOR_LOCALS(uint64_t, nb0, op->src[0], nb);
+    GGML_TENSOR_LOCALS( int32_t, ne1, op->src[1], ne);
+    GGML_TENSOR_LOCALS(uint64_t, nb1, op->src[1], nb);
+    GGML_TENSOR_LOCALS( int32_t, ne,  op,         ne);
+    GGML_TENSOR_LOCALS(uint64_t, nb,  op,         nb);
+
+    GGML_ASSERT(ne00 == ne10);
+
+    auto pipeline = ggml_metal_library_get_pipeline_mul_mm_amd(lib, op);
+
+    ggml_metal_kargs_mul_mm_amd args = {
+        /*.ne00 =*/ ne00,
+        /*.ne01 =*/ ne01,
+        /*.ne11 =*/ ne11,
+        /*.ne12 =*/ ne12,
+        /*.ne13 =*/ ne13,
+        /*.nb01 =*/ nb01,
+        /*.nb02 =*/ nb02,
+        /*.nb03 =*/ nb03,
+        /*.nb11 =*/ nb11,
+        /*.nb12 =*/ nb12,
+        /*.nb13 =*/ nb13,
+        /*.nb1  =*/ nb1,
+        /*.nb2  =*/ nb2,
+        /*.nb3  =*/ nb3,
+        /*.r2   =*/ (int32_t) (ne12/ne02),
+        /*.r3   =*/ (int32_t) (ne13/ne03),
+    };
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
+
+    ggml_metal_encoder_set_threadgroup_memory_size(enc, pipeline.smem, 0);
+
+    const int nr0 = pipeline.nr0;
+    const int nr1 = pipeline.nr1;
+
+    ggml_metal_encoder_dispatch_threadgroups(enc, (ne11 + nr1 - 1)/nr1, (ne01 + nr0 - 1)/nr0, ne12*ne13, 256, 1, 1);
+
+    return 1;
+}
+
 int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
     ggml_tensor * op = ctx->node(idx);
 
@@ -2600,6 +2693,10 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
 
     if (props_dev->has_simdgroup_mm && ggml_metal_op_mul_mat_use_mma(op)) {
         return ggml_metal_op_mul_mat_mma(ctx, idx);
+    }
+
+    if (ggml_metal_mul_mm_amd_supported(op, props_dev)) {
+        return ggml_metal_op_mul_mat_amd(ctx, idx);
     }
 
     GGML_TENSOR_LOCALS( int32_t, ne0, op->src[0], ne);

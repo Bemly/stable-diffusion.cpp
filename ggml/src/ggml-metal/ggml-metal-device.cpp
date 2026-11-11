@@ -983,6 +983,25 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
     return res;
 }
 
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_amd(ggml_metal_library_t lib, const ggml_tensor * op) {
+    char base[256];
+
+    snprintf(base, 256, "kernel_mul_mm_amd_%s", ggml_type_name(op->src[0]->type));
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, base);
+    if (!res.pipeline) {
+        res = ggml_metal_library_compile_pipeline(lib, base, base, nullptr);
+    }
+
+    // BM=64, BN=128, BK=32 fp32 staging: 64*32 + 32*(128+4) floats
+    res.nr0 = 64;
+    res.nr1 = 128;
+    res.nsg = 1;
+    res.smem = sizeof(float)*(64*32 + 32*132);
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_metal_library_t lib, const ggml_tensor * op) {
     GGML_TENSOR_LOCALS( int32_t, ne0, op->src[0], ne);
     GGML_TENSOR_LOCALS( int32_t, ne1, op->src[1], ne);

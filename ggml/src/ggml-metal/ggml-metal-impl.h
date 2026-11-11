@@ -517,6 +517,26 @@ typedef struct {
     int16_t  r3;
 } ggml_metal_kargs_mul_mm;
 
+// tiled mul_mat for devices without simdgroup_matrix (see kernels/mul_mm_amd.metal)
+typedef struct {
+    int32_t  ne00; // K
+    int32_t  ne01; // M
+    int32_t  ne11; // N
+    int32_t  ne12;
+    int32_t  ne13;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    uint64_t nb11;
+    uint64_t nb12;
+    uint64_t nb13;
+    uint64_t nb1;
+    uint64_t nb2;
+    uint64_t nb3;
+    int32_t  r2;
+    int32_t  r3;
+} ggml_metal_kargs_mul_mm_amd;
+
 typedef struct {
     int32_t  ne00;
     int32_t  ne01;
