@@ -302,6 +302,8 @@ struct ggml_metal_device_props {
     bool has_unified_memory;
     bool has_bfloat;
     bool has_tensor;
+    // no simdgroup matrix (AMD): kernel_mul_mm runs its register-tiled manual path
+    bool use_mm_manual;
     bool use_residency_sets;
     bool use_shared_buffers;
 

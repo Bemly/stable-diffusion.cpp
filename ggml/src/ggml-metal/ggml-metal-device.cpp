@@ -934,6 +934,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
     constexpr int NRB = SZ_SIMDGROUP * N_MM_BLOCK_X * N_MM_SIMD_GROUP_X;
 
     const bool has_tensor = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->has_tensor;
+    const bool use_mm_manual = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->use_mm_manual;
+    const bool use_mm_double_buffer = use_mm_manual && getenv("GGML_METAL_MM_DOUBLE_BUFFER_DISABLE") == nullptr;
 
     const bool bc_out = has_tensor
         ? (op->ne[0] % NRA != 0 || op->ne[1] % NRB != 0)
@@ -945,9 +947,16 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
     const int16_t r2   = (int16_t) (ne12 / op->src[0]->ne[2]);
     const int16_t r3   = (int16_t) (ne13 / op->src[0]->ne[3]);
 
+    // the 64x32 tile for short batches is opt-in until its subgroup mapping is rechecked
+    const bool narrow = use_mm_manual && !has_tensor && tsrc1 == GGML_TYPE_F32 && op->ne[1] <= 32 &&
+                        getenv("GGML_METAL_MM_NARROW_ENABLE") != nullptr;
+
+    // the manual path accumulates (k, k+1) pairs; a permuted KV view or bf16 needs float
+    const bool acc_f32 = use_mm_manual && (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16);
+
     snprintf(base, 256, "kernel_mul_mm_%s_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
-    snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d",
-             base, bc_inp, bc_out, ne12, ne13, r2, r3);
+    snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d_mm=%d_nr=%d_db=%d_af=%d",
+             base, bc_inp, bc_out, ne12, ne13, r2, r3, use_mm_manual, narrow, use_mm_double_buffer, acc_f32);
 
     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
     if (!res.pipeline) {
@@ -959,6 +968,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
         ggml_metal_cv_set_int16(cv, ne13,  FC_MUL_MM + 3);
         ggml_metal_cv_set_int16(cv, r2,    FC_MUL_MM + 4);
         ggml_metal_cv_set_int16(cv, r3,    FC_MUL_MM + 5);
+        ggml_metal_cv_set_bool(cv, use_mm_manual,         FC_MUL_MM + 8);
+        ggml_metal_cv_set_bool(cv, narrow,                FC_MUL_MM + 9);
+        ggml_metal_cv_set_bool(cv, use_mm_double_buffer,  FC_MUL_MM + 10);
+        ggml_metal_cv_set_bool(cv, acc_f32,               FC_MUL_MM + 11);
 
         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
 
@@ -973,12 +986,15 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
         res.smem = smem_a;
     } else {
         res.nr0 = 64;
-        res.nr1 = 32;
+        res.nr1 = use_mm_manual ? (narrow ? 32 : 64) : 32;
 
-        res.smem = bc_out ? 8192 : (4096 + 2048);
+        // the manual path fills 4 KiB of A and 4 KiB of B per tile, and 8 KiB more for
+        // the ping-pong buffer; the simdgroup path also reuses the A buffer for the
+        // bounds-checked store, so bc_out needs the full 8 KiB there
+        res.smem = use_mm_double_buffer ? 16384 : ((bc_out || use_mm_manual) ? 8192 : (4096 + 2048));
     }
 
-    res.nsg = N_MM_SIMD_GROUP_X * N_MM_SIMD_GROUP_Y;
+    res.nsg = (!has_tensor && use_mm_manual) ? (narrow ? 4 : 8) : N_MM_SIMD_GROUP_X * N_MM_SIMD_GROUP_Y;
 
     return res;
 }

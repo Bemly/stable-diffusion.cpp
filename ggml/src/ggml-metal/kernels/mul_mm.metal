@@ -9,6 +9,12 @@ constant short FC_mul_mm_r2    [[function_constant(FC_MUL_MM + 4)]];
 constant short FC_mul_mm_r3    [[function_constant(FC_MUL_MM + 5)]];
 constant bool FC_mul_mm_id_amax [[function_constant(FC_MUL_MM + 6)]];
 constant int32_t FC_mul_mm_id_map0_ne02 [[function_constant(FC_MUL_MM + 7)]];
+// manual tiled path for GPUs without simdgroup_matrix (AMD RDNA/GCN): same kernel,
+// register-tiled compute over the existing 8x8 shared-memory blocks
+constant bool FC_mul_mm_manual        [[function_constant(FC_MUL_MM + 8)]];
+constant bool FC_mul_mm_narrow        [[function_constant(FC_MUL_MM + 9)]];
+constant bool FC_mul_mm_double_buffer [[function_constant(FC_MUL_MM + 10)]];
+constant bool FC_mul_mm_acc_f32       [[function_constant(FC_MUL_MM + 11)]];
 
 // each block_q contains 16*nl weights
 #ifdef GGML_METAL_HAS_TENSOR
@@ -163,11 +169,10 @@ kernel void kernel_mul_mm(
         ushort tiitg[[thread_index_in_threadgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
 
-    threadgroup S0 * sa = (threadgroup S0 *)(shmem);
-    threadgroup S1 * sb = (threadgroup S1 *)(shmem + 4096);
-
     constexpr int NR0 = 64;
-    constexpr int NR1 = 32;
+
+    // 64x64 over 8 simdgroups on the manual path: halves the re-read traffic per output
+    const int NR1 = FC_mul_mm_manual ? (FC_mul_mm_narrow ? 32 : 64) : 32;
 
     constexpr int NK  = 32;
     constexpr int NL0 = NK/16;
@@ -183,7 +188,8 @@ kernel void kernel_mul_mm(
 
     // a thread shouldn't load data outside of the matrix
     const short lr0 = ((short)tiitg/NL0) < nr0 ? ((short)tiitg/NL0) : nr0 - 1; // 0 .. 63
-    const short lr1 = ((short)tiitg/NL1) < nr1 ? ((short)tiitg/NL1) : nr1 - 1; // 0 .. 31
+    const short lr1  = ((short)tiitg/NL1)      < nr1 ? ((short)tiitg/NL1)      : nr1 - 1;
+    const short lr1b = ((short)tiitg/NL1 + 32) < nr1 ? ((short)tiitg/NL1 + 32) : nr1 - 1;
 
     const short il0 = (tiitg % NL0);
 
@@ -205,125 +211,258 @@ kernel void kernel_mul_mm(
         + args.nb11*(r1 + lr1)
         + args.nb10*iy);
 
+    device const T1 * yb = (device const T1 *)(src1
+        + args.nb13*i13
+        + args.nb12*i12
+        + args.nb11*(r1 + lr1b)
+        + args.nb10*iy);
+
+    // Manual tiled path for GPUs without simdgroup matrix; simdgroup path otherwise.
+    // 4x4 register tile per lane, rows 8*rr + lr, cols lc + 4*cc of the 32x16
+    // output subtile. vsg is a virtual 32-wide subgroup so the tile offsets stay
+    // correct on wave64 (== sgitg on wave32).
+    const short lane = tiitg % 32;
+    const short lr = lane % 8;
+    const short lc = lane / 8;
+    const short vsg = tiitg / 32;
+
+    float acc[4][4];
     S0_8x8 ma[4];
     S1_8x8 mb[2];
-
     simdgroup_float8x8 mc[8];
 
-    for (short i = 0; i < 8; i++){
-        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
+    if (FC_mul_mm_manual) {
+        for (short i = 0; i < 4; i++) { for (short j = 0; j < 4; j++) { acc[i][j] = 0.f; } }
+    } else {
+        for (short i = 0; i < 8; i++) {
+            mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
+        }
     }
 
+    // only the first 128 threads fill A: with 8 subgroups the rest would index past the tile
+    const bool loadA = !FC_mul_mm_manual || tiitg < 128;
+
     for (int loop_k = 0; loop_k < args.ne00; loop_k += NK) {
+        // ToshGEMM ping-pongs two 8 KiB tiles so the pre-load barrier leaves the K loop.
+        const short db = FC_mul_mm_double_buffer ? ((loop_k/NK) & 1) : 0;
+        threadgroup S0 * sa = (threadgroup S0 *)(shmem + db*8192);
+        threadgroup S1 * sb = (threadgroup S1 *)(shmem + db*8192 + 4096);
+
         // load data and store to threadgroup memory
         if (is_same<T0_4x4, block_q>::value && FC_mul_mm_bc_inp) {
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (!FC_mul_mm_double_buffer) {
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
 
             // no need for dequantization
-            for (short i = 0; i < 16; i++) {
+            for (short i = 0; loadA && i < 16; i++) {
                 const short sx = 2*il0 + i/8;
                 const short sy = (tiitg/NL0)/8;
 
-              //const short lx = i%8;
-              //const short ly = (tiitg/NL0)%8;
                 const short lx = (tiitg/NL0)%8;
                 const short ly = i%8;
 
                 const short ib = 8*sx + sy;
 
-                *(sa + 64*ib + 8*ly + lx) = loop_k + 16*il + i < args.ne00 ? (S0) *((device T0 *) x + i) : 0;
+                // manual path stores row-major within the 8x8 block so (k, k+1)
+                // pairs sit contiguous for its packed compute loop
+                const short el = FC_mul_mm_manual ? (8*lx + ly) : (8*ly + lx);
+
+                *(sa + 64*ib + el) = loop_k + 16*il + i < args.ne00 ? (S0) *((device T0 *) x + i) : 0;
             }
         } else {
             S0_4x4 temp_a;
             dequantize_func(x, il, temp_a);
 
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (!FC_mul_mm_double_buffer) {
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
 
-            FOR_UNROLL (short i = 0; i < 16; i++) {
-                const short sx = 2*il0 + i/8;
-                const short sy = (tiitg/NL0)/8;
+            const short sy = (tiitg/NL0)/8;
+            const short lx = (tiitg/NL0)%8;
 
-              //const short lx = i%8;
-              //const short ly = (tiitg/NL0)%8;
-                const short lx = (tiitg/NL0)%8;
-                const short ly = i%8;
+            if (FC_mul_mm_manual) {
+                // its row-major 8x8 layout leaves each group of 4 contiguous, so the
+                // 16 scalar stores collapse into 4 vector ones
+                const short ib0 = 8*(2*il0    ) + sy;
+                const short ib1 = 8*(2*il0 + 1) + sy;
 
-                const short ib = 8*sx + sy;
+                if (loadA) {
+                    *(threadgroup vec<S0, 4> *)(sa + 64*ib0 + 8*lx + 0) = temp_a[0];
+                    *(threadgroup vec<S0, 4> *)(sa + 64*ib0 + 8*lx + 4) = temp_a[1];
+                    *(threadgroup vec<S0, 4> *)(sa + 64*ib1 + 8*lx + 0) = temp_a[2];
+                    *(threadgroup vec<S0, 4> *)(sa + 64*ib1 + 8*lx + 4) = temp_a[3];
+                }
+            } else {
+                FOR_UNROLL (short i = 0; loadA && i < 16; i++) {
+                    const short sx = 2*il0 + i/8;
+                    const short ly = i%8;
+                    const short ib = 8*sx + sy;
 
-                // NOTE: this is massively slower.. WTF?
-                //sa[64*ib + 8*ly + lx] = temp_a[i/4][i%4];
-
-                *(sa + 64*ib + 8*ly + lx) = temp_a[i/4][i%4];
+                    *(sa + 64*ib + (8*ly + lx)) = temp_a[i/4][i%4];
+                }
             }
         }
 
-        if (FC_mul_mm_bc_inp) {
-            for (short i = 0; i < 8; ++i) {
-                const short sx = (tiitg%NL1);
-                const short sy = (tiitg/NL1)/8;
+        {
+            const short ncb = FC_mul_mm_manual ? 8 : 4;
 
-                const short lx = i;
-                const short ly = (tiitg/NL1)%8;
-              //const short lx = (tiitg/NL1)%8;
-              //const short ly = i;
-
-                const short ib = 4*sx + sy;
-
-                *(sb + 64*ib + 8*ly + lx) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) y + i) : 0;
-            }
-        } else {
             const short sx = (tiitg%NL1);
             const short sy = (tiitg/NL1)/8;
-
-          //const short dx = sx;
-          //const short dy = sy;
-
             const short ly = (tiitg/NL1)%8;
 
-            const short ib = 4*sx + sy;
+            const short ib = ncb*sx + sy;
 
-            *(threadgroup S1_2x4 *)(sb + 64*ib + 8*ly) = (S1_2x4)(*((device T1_2x4 *) y));
+            if (FC_mul_mm_bc_inp) {
+                for (short i = 0; i < 8; ++i) {
+                    *(sb + 64*ib + 8*ly + i) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) y + i) : 0;
+                }
+            } else {
+                *(threadgroup S1_2x4 *)(sb + 64*ib + 8*ly) = (S1_2x4)(*((device T1_2x4 *) y));
+            }
         }
 
         il = (il + 2 < nl) ? il + 2 : il % 2;
         x  = (il < 2) ? x + (2 + nl - 1)/nl : x;
 
-        y += NK;
+        y  += NK;
+        yb += NK;
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         // load matrices from threadgroup memory and conduct outer products
-        threadgroup const S0 * lsma = (sa + 4*64*(sgitg%2));
-        threadgroup const S1 * lsmb = (sb + 2*64*(sgitg/2));
+        threadgroup const S0 * lsma = (sa + 4*64*(vsg%2));
+        threadgroup const S1 * lsmb = (sb + 2*64*(vsg/2));
 
-        FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
-            simdgroup_barrier(mem_flags::mem_none);
+        if (FC_mul_mm_manual) {
+            // packed rank-1 updates on (k, k+1) pairs, flushed to float once per NK.
+            // the accumulators are half by default; attention products overflow that
+            if (FC_mul_mm_acc_f32) {
+                vec<float,2> pacc[4][4];
+                for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
 
-            FOR_UNROLL (short i = 0; i < 4; i++) {
-                simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
+                for (short ik = 0; ik < NK/8; ik++) {
+                    FOR_UNROLL (short k = 0; k < 8; k += 2) {
+                        vec<S0,2> av[4];
+                        vec<S1,2> bv[4];
+                        for (short rr = 0; rr < 4; rr++) {
+                            av[rr] = *(threadgroup const vec<S0,2> *)(lsma + 64*rr + 8*lr + k);
+                        }
+                        for (short cc = 0; cc < 4; cc++) {
+                            const short col = lc + 4*cc;
+                            bv[cc] = *(threadgroup const vec<S1,2> *)(lsmb + 64*(col/8) + 8*(col%8) + k);
+                        }
+                        for (short rr = 0; rr < 4; rr++) {
+                            for (short cc = 0; cc < 4; cc++) {
+                                pacc[rr][cc] = vec<float,2>(av[rr])*vec<float,2>(bv[cc]) + pacc[rr][cc];
+                            }
+                        }
+                    }
+
+                    lsma += 8*64;
+                    lsmb += 8*64;
+                }
+
+                for (short rr = 0; rr < 4; rr++) {
+                    for (short cc = 0; cc < 4; cc++) {
+                        acc[rr][cc] += (float) pacc[rr][cc][0] + (float) pacc[rr][cc][1];
+                    }
+                }
+            } else {
+                vec<S0,2> pacc[4][4];
+
+                // the first block writes its product, so the accumulators need no zeroing pass
+                FOR_UNROLL (short k = 0; k < 8; k += 2) {
+                    vec<S0,2> av[4];
+                    vec<S1,2> bv[4];
+                    for (short rr = 0; rr < 4; rr++) {
+                        av[rr] = *(threadgroup const vec<S0,2> *)(lsma + 64*rr + 8*lr + k);
+                    }
+                    for (short cc = 0; cc < 4; cc++) {
+                        const short col = lc + 4*cc;
+                        bv[cc] = *(threadgroup const vec<S1,2> *)(lsmb + 64*(col/8) + 8*(col%8) + k);
+                    }
+                    for (short rr = 0; rr < 4; rr++) {
+                        for (short cc = 0; cc < 4; cc++) {
+                            const vec<S0,2> p = vec<S0,2>(av[rr])*vec<S0,2>(bv[cc]);
+                            pacc[rr][cc] = k == 0 ? p : p + pacc[rr][cc];
+                        }
+                    }
+                }
+                lsma += 8*64;
+                lsmb += 8*64;
+
+                for (short ik = 1; ik < NK/8; ik++) {
+                    FOR_UNROLL (short k = 0; k < 8; k += 2) {
+                        vec<S0,2> av[4];
+                        vec<S1,2> bv[4];
+                        for (short rr = 0; rr < 4; rr++) {
+                            av[rr] = *(threadgroup const vec<S0,2> *)(lsma + 64*rr + 8*lr + k);
+                        }
+                        for (short cc = 0; cc < 4; cc++) {
+                            const short col = lc + 4*cc;
+                            bv[cc] = *(threadgroup const vec<S1,2> *)(lsmb + 64*(col/8) + 8*(col%8) + k);
+                        }
+                        for (short rr = 0; rr < 4; rr++) {
+                            for (short cc = 0; cc < 4; cc++) {
+                                pacc[rr][cc] = vec<S0,2>(av[rr])*vec<S0,2>(bv[cc]) + pacc[rr][cc];
+                            }
+                        }
+                    }
+
+                    lsma += 8*64;
+                    lsmb += 8*64;
+                }
+
+                for (short rr = 0; rr < 4; rr++) {
+                    for (short cc = 0; cc < 4; cc++) {
+                        acc[rr][cc] += (float) pacc[rr][cc][0] + (float) pacc[rr][cc][1];
+                    }
+                }
             }
+        } else {
+            FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
+                simdgroup_barrier(mem_flags::mem_none);
 
-            simdgroup_barrier(mem_flags::mem_none);
+                FOR_UNROLL (short i = 0; i < 4; i++) {
+                    simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
+                }
 
-            FOR_UNROLL (short i = 0; i < 2; i++) {
-                simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
+                simdgroup_barrier(mem_flags::mem_none);
+
+                FOR_UNROLL (short i = 0; i < 2; i++) {
+                    simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
+                }
+
+                simdgroup_barrier(mem_flags::mem_none);
+
+                FOR_UNROLL (short i = 0; i < 8; i++){
+                    simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
+                }
+
+                lsma += 8*64;
+                lsmb += 4*64;
             }
-
-            simdgroup_barrier(mem_flags::mem_none);
-
-            FOR_UNROLL (short i = 0; i < 8; i++){
-                simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
-            }
-
-            lsma += 8*64;
-            lsmb += 4*64;
         }
     }
 
-    if (!FC_mul_mm_bc_out || (r0 + NR0 <= args.ne0 && r1 + NR1 <= args.ne1)) {
+    if (FC_mul_mm_manual) {
+        const int base_row = r0 + 32*(vsg & 1);
+        const int base_col = r1 + 16*(vsg >> 1);
+        device float * Dbase = (device float *) dst + im*(int64_t)args.ne1*args.ne0;
+        for (short rr = 0; rr < 4; rr++) {
+            for (short cc = 0; cc < 4; cc++) {
+                const int row = base_row + 8*rr + lr;
+                const int col = base_col + lc + 4*cc;
+                if (row < args.ne0 && col < args.ne1) {
+                    Dbase[row + (int64_t)col*args.ne0] = acc[rr][cc];
+                }
+            }
+        }
+    } else if (!FC_mul_mm_bc_out || (r0 + NR0 <= args.ne0 && r1 + NR1 <= args.ne1)) {
         // if no bounds checks on the output are needed, we can directly write to device memory
         device float * C = (device float *) dst +
-            (r0 + 32*(sgitg &  1)) + \
+            (r0 + 32*(sgitg &  1)) +
             (r1 + 16*(sgitg >> 1)) * args.ne0 + im*args.ne1*args.ne0;
 
         for (short i = 0; i < 8; i++) {

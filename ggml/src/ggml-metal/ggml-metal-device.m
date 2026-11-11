@@ -1139,6 +1139,12 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
                 dev->props.has_simdgroup_reduction |= [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
 
                 dev->props.has_simdgroup_mm = [dev->mtl_device supportsFamily:MTLGPUFamilyApple7];
+
+                // AMD RDNA/GCN have no simdgroup_matrix, so kernel_mul_mm falls back to
+                // kernel_mul_mv there and re-reads the weights for every few columns. The
+                // manual register-tiled path in the same kernel replaces that.
+                dev->props.use_mm_manual = !dev->props.has_simdgroup_mm &&
+                                           getenv("GGML_METAL_MM_MANUAL_DISABLE") == NULL;
                 dev->props.has_unified_memory = dev->mtl_device.hasUnifiedMemory;
 
                 dev->props.has_bfloat  = [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
@@ -1864,7 +1870,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
             }
             return ggml_metal_supports_mul_mat_op(
                     has_simdgroup_reduction, op, true,
-                    ggml_metal_op_mul_mat_use_mm(op, has_simdgroup_mm));
+                    ggml_metal_op_mul_mat_use_mm(op, has_simdgroup_mm || dev->props.use_mm_manual));
         case GGML_OP_MUL_MAT_ID:
             return ggml_metal_supports_mul_mat_op(
                     has_simdgroup_reduction, op, false,
