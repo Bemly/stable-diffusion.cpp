@@ -515,6 +515,7 @@ typedef struct {
     int32_t  ne1;
     int16_t  r2;
     int16_t  r3;
+    int32_t  band;  // src1 tiles per band in the tile order, 0 = plain order
 } ggml_metal_kargs_mul_mm;
 
 // tiled mul_mat for devices without simdgroup_matrix (see kernels/mul_mm_amd.metal)

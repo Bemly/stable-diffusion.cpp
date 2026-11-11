@@ -166,6 +166,7 @@ kernel void kernel_mul_mm(
         device       char * dst,
         threadgroup  char * shmem [[threadgroup(0)]],
         uint3  tgpig[[threadgroup_position_in_grid]],
+        uint3  tgpg [[threadgroups_per_grid]],
         ushort tiitg[[thread_index_in_threadgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
 
@@ -178,9 +179,22 @@ kernel void kernel_mul_mm(
     constexpr int NL0 = NK/16;
     constexpr int NL1 = NK/8;
 
+    // in bands of src1 tiles every src0 tile runs over one band before the next one starts, so
+    // a src1 larger than the cache is read from the cache once per band, not from memory
+    uint tx = tgpig.x;
+    uint ty = tgpig.y;
+    if (args.band > 0) {
+        const uint lin = tgpig.y*tgpg.x + tgpig.x;
+        const uint b0  = (lin / (args.band*tgpg.y))*args.band;
+        const uint bw  = min((uint) args.band, tgpg.x - b0);
+        const uint rem = lin - b0*tgpg.y;
+        ty = rem / bw;
+        tx = b0 + rem % bw;
+    }
+
     const int im = tgpig.z;
-    const int r0 = tgpig.y*NR0;
-    const int r1 = tgpig.x*NR1;
+    const int r0 = ty*NR0;
+    const int r1 = tx*NR1;
 
     // if this block is of 64x32 shape or smaller
     const short nr0 = (args.ne0 - r0 < NR0) ? (args.ne0 - r0) : NR0;
