@@ -2590,7 +2590,8 @@ static int ggml_metal_op_mul_mat_mv(ggml_metal_op_t ctx, int idx) {
 // kernel_mul_mm cannot run and every batched matmul falls back to kernel_mul_mv.
 // Only the shapes that actually re-read the weights there are routed here.
 static bool ggml_metal_mul_mm_amd_supported(const ggml_tensor * op, const ggml_metal_device_props * props) {
-    if (props->has_simdgroup_mm) {
+    static const bool disabled = getenv("GGML_METAL_MM_AMD_DISABLE") != nullptr;
+    if (disabled || props->has_simdgroup_mm) {
         return false;
     }
 
