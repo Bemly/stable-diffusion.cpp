@@ -2590,8 +2590,13 @@ static int ggml_metal_op_mul_mat_mv(ggml_metal_op_t ctx, int idx) {
 // kernel_mul_mm cannot run and every batched matmul falls back to kernel_mul_mv.
 // Only the shapes that actually re-read the weights there are routed here.
 static bool ggml_metal_mul_mm_amd_supported(const ggml_tensor * op, const ggml_metal_device_props * props) {
-    static const bool disabled = getenv("GGML_METAL_MM_AMD_DISABLE") != nullptr;
-    if (disabled || props->has_simdgroup_mm) {
+    // Opt-in. On RDNA2 the kernel is correct in isolated tests (test-backend-ops
+    // passes 113/113 q8_0) but corrupts large graphs and wedges the GPU: a MOSS-Image
+    // DiT forward returns all-NaN / 1e7 garbage and the driver resets the GFX ring
+    // every few minutes, which ends with the WindowServer watchdog killing the session.
+    // Enable with GGML_METAL_MM_AMD_ENABLE=1 for benchmarking only.
+    static const bool enabled = getenv("GGML_METAL_MM_AMD_ENABLE") != nullptr;
+    if (!enabled || props->has_simdgroup_mm) {
         return false;
     }
 
