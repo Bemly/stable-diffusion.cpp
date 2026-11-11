@@ -739,6 +739,13 @@ ggml_metal_event_t ggml_metal_get_ev_cpy(ggml_metal_t ctx) {
 }
 
 void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
+    // explicit override for benchmarking the encoder split
+    const char * ncb_env = getenv("GGML_METAL_NCB");
+    if (ncb_env) {
+        const int v = atoi(ncb_env);
+        if (v > 0) { n_cb = v; }
+    }
+
     // when fusion stats are collected the graph must be encoded by a single thread so the
     // counters are race-free; override whatever the caller requested
     if (ggml_metal_fusion_info_stats(ctx->finfo)) {

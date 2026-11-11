@@ -952,7 +952,11 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
                         getenv("GGML_METAL_MM_NARROW_ENABLE") != nullptr;
 
     // the manual path accumulates (k, k+1) pairs; a permuted KV view or bf16 needs float
-    const bool acc_f32 = use_mm_manual && (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16);
+    // diffusion activations overflow half partials on some models, so float stays the default;
+    // TOSH_MM_ACC_HALF opts a model validated in half back into the faster path
+    static const bool acc_half = getenv("TOSH_MM_ACC_HALF") != nullptr;
+    const bool acc_f32 = use_mm_manual &&
+                         (!acc_half || !ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16);
 
     snprintf(base, 256, "kernel_mul_mm_%s_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
     snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d_mm=%d_nr=%d_db=%d_af=%d",
