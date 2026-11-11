@@ -2356,6 +2356,15 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * 
                                                               options:MTLResourceStorageModeShared
                                                           deallocator:nil];
 
+        // newBufferWithBytesNoCopy needs a page-aligned host pointer and returns nil
+        // otherwise. Fall back to a regular shared buffer with an explicit copy.
+        if (buf_src == nil) {
+            buf_src = [buf->dev->mtl_device newBufferWithLength:size options:MTLResourceStorageModeShared];
+            if (buf_src != nil) {
+                memcpy([buf_src contents], data_ptr, size);
+            }
+        }
+
         GGML_ASSERT(buf_src);
 
         // dst
@@ -2415,6 +2424,13 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
                                                               options:MTLResourceStorageModeShared
                                                           deallocator:nil];
 
+        // newBufferWithBytesNoCopy needs a page-aligned host pointer and returns nil
+        // otherwise. Fall back to a plain shared buffer and copy out after the blit.
+        const bool buf_dst_nocopy = buf_dst != nil;
+        if (buf_dst == nil) {
+            buf_dst = [buf->dev->mtl_device newBufferWithLength:size options:MTLResourceStorageModeShared];
+        }
+
         GGML_ASSERT(buf_dst);
 
         id<MTLCommandBuffer> cmd_buf = [buf->dev->mtl_queue commandBufferWithUnretainedReferences];
@@ -2433,6 +2449,10 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
 
         [cmd_buf commit];
         [cmd_buf waitUntilCompleted];
+
+        if (!buf_dst_nocopy) {
+            memcpy(data, [buf_dst contents], size);
+        }
 
         [buf_dst release];
     }

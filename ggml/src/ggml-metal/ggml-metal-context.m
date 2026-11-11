@@ -139,7 +139,12 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
 
         res->d_queue = dispatch_queue_create("ggml-metal", DISPATCH_QUEUE_CONCURRENT);
 
-        res->use_concurrency = getenv("GGML_METAL_CONCURRENCY_DISABLE") == nil;
+        // Barrier elision between non-overlapping ops is unsafe here: the range check keys
+        // unallocated tensors by pointer, so tensors that end up aliasing the same buffer are
+        // treated as disjoint and race. On the AMD RDNA2 backend this makes large DiT graphs
+        // (e.g. MOSS-Image) nondeterministic, and serialized encoding measured no slower.
+        res->use_concurrency = getenv("GGML_METAL_CONCURRENCY_ENABLE") != nil &&
+                               getenv("GGML_METAL_CONCURRENCY_DISABLE") == nil;
 
         {
             const char * val = getenv("GGML_METAL_GRAPH_DEBUG");
