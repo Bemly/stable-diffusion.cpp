@@ -178,8 +178,8 @@ struct SDContextParams {
     bool control_net_cpu        = false;
     bool clip_on_cpu            = false;
     bool vae_on_cpu             = false;
-    std::string flash_attn_mode = "auto";
-    std::string conv_direct_mode;  // Empty selects auto while honoring legacy convolution flags.
+    std::string flash_attn_mode = "on";
+    std::string conv_direct_mode = "on";  // All modules; auto probing picked per-shape winners that lose on long sequences.
     bool sage_attn             = false;
     bool diffusion_conv_direct = false;
     bool vae_conv_direct       = false;

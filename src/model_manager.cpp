@@ -1224,10 +1224,12 @@ void ModelManager::release_compute_staging_blocks(bool force,
         }
     }
     for (const auto& entry : released) {
-        LOG_DEBUG("model manager released compute params (%6.2f MB, %zu tensors, %zu blocks) from %s",
-                  entry.second.bytes / (1024.f * 1024.f),
-                  entry.second.tensors, entry.second.blocks,
-                  entry.first != nullptr ? ggml_backend_name(entry.first) : "unknown");
+        // INFO, not DEBUG: an eviction that flushes compute staging is the first
+        // visible step of per-step weight thrashing; at DEBUG it is invisible.
+        LOG_INFO("model manager released compute params (%6.2f MB, %zu tensors, %zu blocks) from %s",
+                 entry.second.bytes / (1024.f * 1024.f),
+                 entry.second.tensors, entry.second.blocks,
+                 entry.first != nullptr ? ggml_backend_name(entry.first) : "unknown");
     }
 }
 
@@ -1296,11 +1298,13 @@ void ModelManager::release_params_storage_blocks(bool force,
         }
     }
     for (const auto& entry : released) {
-        LOG_VERBOSE("model manager released params backend buffers (%6.2f MB, %zu tensors, %zu blocks, %s) from %s",
-                    entry.second.bytes / (1024.f * 1024.f),
-                    entry.second.tensors, entry.second.blocks,
-                    ggml_backend_buft_is_host(entry.first) ? "RAM" : "VRAM",
-                    ggml_backend_buft_name(entry.first));
+        // INFO, not VERBOSE: releasing params-backend buffers means weights left
+        // VRAM and will reload from disk on their next use.
+        LOG_INFO("model manager released params backend buffers (%6.2f MB, %zu tensors, %zu blocks, %s) from %s",
+                 entry.second.bytes / (1024.f * 1024.f),
+                 entry.second.tensors, entry.second.blocks,
+                 ggml_backend_buft_is_host(entry.first) ? "RAM" : "VRAM",
+                 ggml_backend_buft_name(entry.first));
     }
 }
 
@@ -1998,6 +2002,36 @@ bool ModelManager::ensure_compute_backend_capacity(
             }
         }
     };
+    // Reaching disk demotion means VRAM cannot hold the weights a segment needs
+    // alongside everything else. Flushed params reload from disk on every use,
+    // and in segmented compute that repeats every denoising step: a healthy
+    // step turns into minutes. Surface it loudly instead of failing silently.
+    auto warn_disk_demotions = [&]() {
+        size_t flushed      = 0;
+        int64_t flush_bytes = 0;
+        for (TensorState* state : demoted_states) {
+            if (state->residency_mode == ResidencyMode::Disk && !state->loaded_to_params_backend) {
+                ++flushed;
+                if (state->tensor != nullptr) {
+                    flush_bytes += (int64_t)ggml_nbytes(state->tensor);
+                }
+            }
+        }
+        if (flushed == 0) {
+            return;
+        }
+        static std::chrono::steady_clock::time_point last_warn;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_warn < std::chrono::seconds(10)) {
+            return;
+        }
+        last_warn = now;
+        LOG_WARN("model manager demoted %zu params (%.2f MB) on %s to disk residency to make room; "
+                 "they reload from disk on every use, so each denoising step becomes orders of "
+                 "magnitude slower. Free GPU memory (close other GPU applications) or shorten "
+                 "the prompt / reduce the resolution.",
+                 flushed, flush_bytes / (1024.0 * 1024.0), ggml_backend_name(compute_backend));
+    };
     auto can_demote_to_disk = [&](TensorState* state) {
         return state != nullptr && state->tensor != nullptr && state->tensor->view_src == nullptr &&
                state->residency_mode == ResidencyMode::ParamBackend &&
@@ -2019,10 +2053,12 @@ bool ModelManager::ensure_compute_backend_capacity(
         add_evictable_state(state);
         if (release_eviction_states()) {
             revert_demotions();
+            warn_disk_demotions();
             return true;
         }
     }
     revert_demotions();
+    warn_disk_demotions();
 
     auto capacity = check_capacity(request, required_states);
     if (!capacity.requires_reclamation && capacity.fits()) {

@@ -393,8 +393,8 @@ void sd_ctx_params_init(sd_ctx_params_t* sd_ctx_params) {
     sd_ctx_params->batched_cfg               = true;
     sd_ctx_params->eager_load                = false;
     sd_ctx_params->enable_mmap               = false;
-    sd_ctx_params->flash_attn_mode           = nullptr;
-    sd_ctx_params->conv_direct_mode          = nullptr;
+    sd_ctx_params->flash_attn_mode           = "on";
+    sd_ctx_params->conv_direct_mode          = "on";
     sd_ctx_params->diffusion_flash_attn      = false;
     sd_ctx_params->sage_attn                 = false;
     sd_ctx_params->linear_scale              = 0.f;
