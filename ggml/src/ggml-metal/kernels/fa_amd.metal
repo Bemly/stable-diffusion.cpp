@@ -418,3 +418,448 @@ template [[host_name("kernel_flash_attn_ext_amd_tile_dk64_nbc64" )]] kernel flas
 template [[host_name("kernel_flash_attn_ext_amd_tile_dk128_nbc64")]] kernel flash_attn_ext_amd_tile_t kernel_flash_attn_ext_amd_tile_dk<128, 128, 64, 32>;
 template [[host_name("kernel_flash_attn_ext_amd_tile_dk256_nbc64")]] kernel flash_attn_ext_amd_tile_t kernel_flash_attn_ext_amd_tile_dk<256, 256, 64, 32>;
 template [[host_name("kernel_flash_attn_ext_amd_tile_dk512_nbc32")]] kernel flash_attn_ext_amd_tile_t kernel_flash_attn_ext_amd_tile_dk<512, 512, 32, 32>;
+
+// ─────────────────────────── prefill pf kernels ───────────────────────────
+// Ported from ToshLLM (patches/shared-metal/0001-6-metal-flash-attn-amd.patch and
+// patches/image/0066-image-metal-fa-nomask.patch), Copyright (C) 2026 Engelbert Delgado,
+// GPL-3.0-or-later; adapted 2026-11-13 to ggml_metal_kargs_flash_attn_ext_amd, F16 KV only.
+//
+// BQ queries stay resident while the cache streams in blocks of BK, so the score matrix never
+// reaches device memory. Q, K and V are staged in LDS and both products run as 4x4 register
+// tiles of packed half2 FMAs. Lanes split into groups of 16 so every softmax reduction stays
+// inside one simdgroup. Row strides are padded off the 32-bank period.
+
+template <short DK, short BQ, short BK, short NT>
+kernel void kernel_flash_attn_ext_amd_pf_dk(
+        constant ggml_metal_kargs_flash_attn_ext_amd & args,
+        device  const char * q,
+        device  const char * k,
+        device  const char * v,
+        device  const char * mask,
+        device        char * dst,
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort  tiitg [[thread_index_in_threadgroup]]) {
+    constexpr short DK4 = DK/4;
+    constexpr short NQG = NT/16;
+    constexpr short NQR = BQ/NQG;
+    constexpr short NKC = BK/16;
+    constexpr short NDC = DK/16;
+    constexpr short FLR = 16;   // half2 partial sums flush to float every FLR terms
+    constexpr short SQS = DK + 4;
+    constexpr short SVS = BK + 4;
+    constexpr short SKV = BK*SQS > DK*SVS ? BK*SQS : DK*SVS;
+
+    threadgroup half sq [BQ*SQS];
+    threadgroup half skv[SKV];     // K rows first, then V transposed over the same memory
+    threadgroup half sp [BQ*SVS];  // softmax weights
+
+    const short kg = tiitg % 16;
+    const short qg = tiitg / 16;
+
+    const int iq1 = tgpig.x*BQ;
+    const int ih  = tgpig.y;
+    const int ib  = tgpig.z;
+
+    const int ikv2 = ih / (args.ne02/args.ne_12_2);
+    const int ikv3 = ib / (args.ne03/args.ne_12_3);
+
+    device const char * kp = k + ikv2*args.nb12 + ikv3*args.nb13;
+    device const char * vp = v + ikv2*args.nb22 + ikv3*args.nb23;
+
+    // scale folded into Q so the score pass is a plain dot product
+    for (short c = tiitg; c < BQ*DK4; c += NT) {
+        const short jq = c / DK4;
+        const short ch = c % DK4;
+        float4 qv = 0.0f;
+        if (iq1 + jq < args.ne01) {
+            qv = ((device const float4 *) (q + (uint64_t) (iq1 + jq)*args.nb01 + ih*args.nb02 + ib*args.nb03))[ch]*args.scale;
+        }
+        *(threadgroup half4 *) (sq + jq*SQS + 4*ch) = (half4) qv;
+    }
+
+    // the mask values a thread needs are exactly the ones it reduces, so they stay in registers
+    device const half * pmr[NQR];
+    if (HAS_MASK_FA_AMD) {
+        for (short rr = 0; rr < NQR; ++rr) {
+            const int jq = iq1 + qg + NQG*rr;
+            const int gq = jq < args.ne01 ? jq : args.ne01 - 1;
+            pmr[rr] = (device const half *)
+                (mask + (uint64_t) gq*args.nb31 + (ih % args.ne32)*args.nb32 + (ib % args.ne33)*args.nb33);
+        }
+    }
+
+    float m   [NQR];
+    float srun[NQR];
+    float acc [NQR][NDC];
+    for (short rr = 0; rr < NQR; ++rr) {
+        m[rr]    = -FLT_MAX/2;
+        srun[rr] = 0.0f;
+        for (short dd = 0; dd < NDC; ++dd) {
+            acc[rr][dd] = 0.0f;
+        }
+    }
+
+    for (int j0 = 0; j0 < args.ne11; j0 += BK) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // mask and K read together so their loads overlap
+        half  mv[NQR][NKC];
+        float any = 1.0f;
+        if (HAS_MASK_FA_AMD) {
+            any = 0.0f;
+            for (short rr = 0; rr < NQR; ++rr) {
+                for (short cc = 0; cc < NKC; ++cc) {
+                    const short col = kg + 16*cc;
+                    const half x = j0 + col < args.ne11 ? pmr[rr][j0 + col] : (half) -65504.0h;
+                    mv[rr][cc] = x;
+                    any = max(any, (float) x > -1e30f ? 1.0f : 0.0f);
+                }
+            }
+        }
+
+        for (short c = tiitg; c < BK*DK4; c += NT) {
+            const short jj = c / DK4;
+            const short ch = c % DK4;
+            *(threadgroup half4 *) (skv + jj*SQS + 4*ch) = j0 + jj < args.ne11
+                ? ((device const half4 *) (kp + (uint64_t) (j0 + jj)*args.nb11))[ch] : (half4) 0.0h;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // skip is per query group; the loads and barriers below stay uniform
+        for (ushort o = 1; o < 16; o <<= 1) {
+            any = max(any, simd_shuffle_xor(any, o));
+        }
+        if (any > 0.0f) {
+            float sc[NQR][NKC];
+            for (short rr = 0; rr < NQR; ++rr) {
+                for (short cc = 0; cc < NKC; ++cc) {
+                    sc[rr][cc] = 0.0f;
+                }
+            }
+            for (short d0 = 0; d0 < DK; d0 += FLR) {
+                half2 pacc[NQR][NKC];
+                for (short rr = 0; rr < NQR; ++rr) {
+                    for (short cc = 0; cc < NKC; ++cc) {
+                        pacc[rr][cc] = 0.0h;
+                    }
+                }
+                FOR_UNROLL (short d = 0; d < FLR; d += 2) {
+                    half2 av[NQR];
+                    half2 bv[NKC];
+                    for (short rr = 0; rr < NQR; ++rr) {
+                        av[rr] = *(threadgroup const half2 *) (sq + (qg + NQG*rr)*SQS + d0 + d);
+                    }
+                    for (short cc = 0; cc < NKC; ++cc) {
+                        bv[cc] = *(threadgroup const half2 *) (skv + (kg + 16*cc)*SQS + d0 + d);
+                    }
+                    for (short rr = 0; rr < NQR; ++rr) {
+                        for (short cc = 0; cc < NKC; ++cc) {
+                            pacc[rr][cc] = av[rr]*bv[cc] + pacc[rr][cc];
+                        }
+                    }
+                }
+                for (short rr = 0; rr < NQR; ++rr) {
+                    for (short cc = 0; cc < NKC; ++cc) {
+                        sc[rr][cc] += (float) pacc[rr][cc][0] + (float) pacc[rr][cc][1];
+                    }
+                }
+            }
+
+            for (short rr = 0; rr < NQR; ++rr) {
+                const short row = qg + NQG*rr;
+                float mx = -FLT_MAX;
+                for (short cc = 0; cc < NKC; ++cc) {
+                    if (HAS_MASK_FA_AMD) {
+                        sc[rr][cc] += (float) mv[rr][cc];
+                    } else if (j0 + kg + 16*cc >= args.ne11) {
+                        sc[rr][cc] = -INFINITY;
+                    }
+                    mx = max(mx, sc[rr][cc]);
+                }
+                for (ushort o = 1; o < 16; o <<= 1) {
+                    mx = max(mx, simd_shuffle_xor(mx, o));
+                }
+
+                const float mn   = max(m[rr], mx);
+                const float corr = exp(m[rr] - mn);
+
+                float ls = 0.0f;
+                for (short cc = 0; cc < NKC; ++cc) {
+                    const float w = exp(sc[rr][cc] - mn);
+                    sp[row*SVS + kg + 16*cc] = (half) w;
+                    ls += w;
+                }
+                for (ushort o = 1; o < 16; o <<= 1) {
+                    ls += simd_shuffle_xor(ls, o);
+                }
+
+                m[rr]    = mn;
+                srun[rr] = srun[rr]*corr + ls;
+                for (short dd = 0; dd < NDC; ++dd) {
+                    acc[rr][dd] *= corr;
+                }
+            }
+        }
+
+        // V lands transposed so the P*V pass reads two cache rows in one half2
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (short c = tiitg; c < BK*DK4; c += NT) {
+            const short jj = c / DK4;
+            const short ch = c % DK4;
+            const half4 tv = j0 + jj < args.ne11
+                ? ((device const half4 *) (vp + (uint64_t) (j0 + jj)*args.nb21))[ch] : (half4) 0.0h;
+            for (short i = 0; i < 4; ++i) {
+                skv[(4*ch + i)*SVS + jj] = tv[i];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (any == 0.0f) {
+            continue;
+        }
+
+        for (short j1 = 0; j1 < BK; j1 += FLR) {
+            half2 pacc[NQR][NDC];
+            for (short rr = 0; rr < NQR; ++rr) {
+                for (short dd = 0; dd < NDC; ++dd) {
+                    pacc[rr][dd] = 0.0h;
+                }
+            }
+            FOR_UNROLL (short jj = 0; jj < FLR; jj += 2) {
+                half2 pv[NQR];
+                half2 vv[NDC];
+                for (short rr = 0; rr < NQR; ++rr) {
+                    pv[rr] = *(threadgroup const half2 *) (sp + (qg + NQG*rr)*SVS + j1 + jj);
+                }
+                for (short dd = 0; dd < NDC; ++dd) {
+                    vv[dd] = *(threadgroup const half2 *) (skv + (kg + 16*dd)*SVS + j1 + jj);
+                }
+                for (short rr = 0; rr < NQR; ++rr) {
+                    for (short dd = 0; dd < NDC; ++dd) {
+                        pacc[rr][dd] = pv[rr]*vv[dd] + pacc[rr][dd];
+                    }
+                }
+            }
+            for (short rr = 0; rr < NQR; ++rr) {
+                for (short dd = 0; dd < NDC; ++dd) {
+                    acc[rr][dd] += (float) pacc[rr][dd][0] + (float) pacc[rr][dd][1];
+                }
+            }
+        }
+    }
+
+    for (short rr = 0; rr < NQR; ++rr) {
+        const int iq = iq1 + qg + NQG*rr;
+        if (iq >= args.ne01) {
+            continue;
+        }
+        const float inv = srun[rr] > 0.0f ? 1.0f/srun[rr] : 0.0f;
+        device float * d = (device float *) (dst + ib*args.nbb_d + ih*args.nbh_d + (uint64_t) iq*args.nbq_d);
+        for (short dd = 0; dd < NDC; ++dd) {
+            d[kg + 16*dd] = acc[rr][dd]*inv;
+        }
+    }
+}
+
+// no mask: K and V load together into their own LDS regions, one barrier fewer per block
+template <short DK, short BQ, short BK, short NT>
+kernel void kernel_flash_attn_ext_amd_pf_nomask_dk(
+        constant ggml_metal_kargs_flash_attn_ext_amd & args,
+        device  const char * q,
+        device  const char * k,
+        device  const char * v,
+        device  const char * mask,
+        device        char * dst,
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort  tiitg [[thread_index_in_threadgroup]]) {
+    constexpr short DK4 = DK/4;
+    constexpr short NQG = NT/16;
+    constexpr short NQR = BQ/NQG;
+    constexpr short NKC = BK/16;
+    constexpr short NDC = DK/16;
+    constexpr short FLR = 16;
+    constexpr short SQS = DK + 4;
+    constexpr short SVS = BK + 4;
+
+    threadgroup half sq[BQ*SQS];
+    threadgroup half sk[BK*SQS];
+    threadgroup half sv[DK*SVS];  // V transposed
+    threadgroup half sp[BQ*SVS];  // softmax weights
+
+    const short kg = tiitg % 16;
+    const short qg = tiitg / 16;
+
+    const int iq1 = tgpig.x*BQ;
+    const int ih  = tgpig.y;
+    const int ib  = tgpig.z;
+
+    const int ikv2 = ih / (args.ne02/args.ne_12_2);
+    const int ikv3 = ib / (args.ne03/args.ne_12_3);
+
+    device const char * kp = k + ikv2*args.nb12 + ikv3*args.nb13;
+    device const char * vp = v + ikv2*args.nb22 + ikv3*args.nb23;
+
+    for (short c = tiitg; c < BQ*DK4; c += NT) {
+        const short jq = c / DK4;
+        const short ch = c % DK4;
+        float4 qv = 0.0f;
+        if (iq1 + jq < args.ne01) {
+            qv = ((device const float4 *) (q + (uint64_t) (iq1 + jq)*args.nb01 + ih*args.nb02 + ib*args.nb03))[ch]*args.scale;
+        }
+        *(threadgroup half4 *) (sq + jq*SQS + 4*ch) = (half4) qv;
+    }
+
+    float m   [NQR];
+    float srun[NQR];
+    float acc [NQR][NDC];
+    for (short rr = 0; rr < NQR; ++rr) {
+        m[rr]    = -FLT_MAX/2;
+        srun[rr] = 0.0f;
+        for (short dd = 0; dd < NDC; ++dd) {
+            acc[rr][dd] = 0.0f;
+        }
+    }
+
+    for (int j0 = 0; j0 < args.ne11; j0 += BK) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (short c = tiitg; c < BK*DK4; c += NT) {
+            const short jj = c / DK4;
+            const short ch = c % DK4;
+            *(threadgroup half4 *) (sk + jj*SQS + 4*ch) = j0 + jj < args.ne11
+                ? ((device const half4 *) (kp + (uint64_t) (j0 + jj)*args.nb11))[ch] : (half4) 0.0h;
+        }
+        for (short c = tiitg; c < (BK/2)*DK4; c += NT) {
+            const short jj = 2*(c / DK4);
+            const short ch = c % DK4;
+            const half4 t0 = j0 + jj < args.ne11
+                ? ((device const half4 *) (vp + (uint64_t) (j0 + jj)*args.nb21))[ch] : (half4) 0.0h;
+            const half4 t1 = j0 + jj + 1 < args.ne11
+                ? ((device const half4 *) (vp + (uint64_t) (j0 + jj + 1)*args.nb21))[ch] : (half4) 0.0h;
+            for (short e = 0; e < 4; ++e) {
+                *(threadgroup half2 *) (sv + (4*ch + e)*SVS + jj) = half2(t0[e], t1[e]);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float sc[NQR][NKC];
+        for (short rr = 0; rr < NQR; ++rr) {
+            for (short cc = 0; cc < NKC; ++cc) {
+                sc[rr][cc] = 0.0f;
+            }
+        }
+        for (short d0 = 0; d0 < DK; d0 += FLR) {
+            half2 pacc[NQR][NKC];
+            for (short rr = 0; rr < NQR; ++rr) {
+                for (short cc = 0; cc < NKC; ++cc) {
+                    pacc[rr][cc] = 0.0h;
+                }
+            }
+            FOR_UNROLL (short d = 0; d < FLR; d += 2) {
+                half2 av[NQR];
+                half2 bv[NKC];
+                for (short rr = 0; rr < NQR; ++rr) {
+                    av[rr] = *(threadgroup const half2 *) (sq + (qg + NQG*rr)*SQS + d0 + d);
+                }
+                for (short cc = 0; cc < NKC; ++cc) {
+                    bv[cc] = *(threadgroup const half2 *) (sk + (kg + 16*cc)*SQS + d0 + d);
+                }
+                for (short rr = 0; rr < NQR; ++rr) {
+                    for (short cc = 0; cc < NKC; ++cc) {
+                        pacc[rr][cc] = av[rr]*bv[cc] + pacc[rr][cc];
+                    }
+                }
+            }
+            for (short rr = 0; rr < NQR; ++rr) {
+                for (short cc = 0; cc < NKC; ++cc) {
+                    sc[rr][cc] += (float) pacc[rr][cc][0] + (float) pacc[rr][cc][1];
+                }
+            }
+        }
+
+        for (short rr = 0; rr < NQR; ++rr) {
+            const short row = qg + NQG*rr;
+            float mx = -FLT_MAX;
+            for (short cc = 0; cc < NKC; ++cc) {
+                if (j0 + kg + 16*cc >= args.ne11) {
+                    sc[rr][cc] = -INFINITY;
+                }
+                mx = max(mx, sc[rr][cc]);
+            }
+            for (ushort o = 1; o < 16; o <<= 1) {
+                mx = max(mx, simd_shuffle_xor(mx, o));
+            }
+
+            const float mn   = max(m[rr], mx);
+            const float corr = exp(m[rr] - mn);
+
+            float ls = 0.0f;
+            for (short cc = 0; cc < NKC; ++cc) {
+                const float w = exp(sc[rr][cc] - mn);
+                sp[row*SVS + kg + 16*cc] = (half) w;
+                ls += w;
+            }
+            for (ushort o = 1; o < 16; o <<= 1) {
+                ls += simd_shuffle_xor(ls, o);
+            }
+
+            m[rr]    = mn;
+            srun[rr] = srun[rr]*corr + ls;
+            for (short dd = 0; dd < NDC; ++dd) {
+                acc[rr][dd] *= corr;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (short j1 = 0; j1 < BK; j1 += FLR) {
+            half2 pacc[NQR][NDC];
+            for (short rr = 0; rr < NQR; ++rr) {
+                for (short dd = 0; dd < NDC; ++dd) {
+                    pacc[rr][dd] = 0.0h;
+                }
+            }
+            FOR_UNROLL (short jj = 0; jj < FLR; jj += 2) {
+                half2 pv[NQR];
+                half2 vv[NDC];
+                for (short rr = 0; rr < NQR; ++rr) {
+                    pv[rr] = *(threadgroup const half2 *) (sp + (qg + NQG*rr)*SVS + j1 + jj);
+                }
+                for (short dd = 0; dd < NDC; ++dd) {
+                    vv[dd] = *(threadgroup const half2 *) (sv + (kg + 16*dd)*SVS + j1 + jj);
+                }
+                for (short rr = 0; rr < NQR; ++rr) {
+                    for (short dd = 0; dd < NDC; ++dd) {
+                        pacc[rr][dd] = pv[rr]*vv[dd] + pacc[rr][dd];
+                    }
+                }
+            }
+            for (short rr = 0; rr < NQR; ++rr) {
+                for (short dd = 0; dd < NDC; ++dd) {
+                    acc[rr][dd] += (float) pacc[rr][dd][0] + (float) pacc[rr][dd][1];
+                }
+            }
+        }
+    }
+
+    for (short rr = 0; rr < NQR; ++rr) {
+        const int iq = iq1 + qg + NQG*rr;
+        if (iq >= args.ne01) {
+            continue;
+        }
+        const float inv = srun[rr] > 0.0f ? 1.0f/srun[rr] : 0.0f;
+        device float * d = (device float *) (dst + ib*args.nbb_d + ih*args.nbh_d + (uint64_t) iq*args.nbq_d);
+        for (short dd = 0; dd < NDC; ++dd) {
+            d[kg + 16*dd] = acc[rr][dd]*inv;
+        }
+    }
+}
+
+// BQ falls as the head grows so the O accumulators stay near 32 registers per thread
+typedef decltype(kernel_flash_attn_ext_amd_pf_dk<128, 64, 64, 256>)        flash_attn_ext_amd_pf_t;
+typedef decltype(kernel_flash_attn_ext_amd_pf_nomask_dk<128, 64, 64, 256>) flash_attn_ext_amd_pf_nomask_t;
+
+template [[host_name("kernel_flash_attn_ext_amd_pf_dk64" )]] kernel flash_attn_ext_amd_pf_t kernel_flash_attn_ext_amd_pf_dk< 64, 64, 64, 256>;
+template [[host_name("kernel_flash_attn_ext_amd_pf_dk128")]] kernel flash_attn_ext_amd_pf_t kernel_flash_attn_ext_amd_pf_dk<128, 64, 64, 256>;
+template [[host_name("kernel_flash_attn_ext_amd_pf_dk256")]] kernel flash_attn_ext_amd_pf_t kernel_flash_attn_ext_amd_pf_dk<256, 32, 64, 256>;
+
+template [[host_name("kernel_flash_attn_ext_amd_pf_nomask_dk64" )]] kernel flash_attn_ext_amd_pf_nomask_t kernel_flash_attn_ext_amd_pf_nomask_dk< 64, 64, 64, 256>;
+template [[host_name("kernel_flash_attn_ext_amd_pf_nomask_dk128")]] kernel flash_attn_ext_amd_pf_nomask_t kernel_flash_attn_ext_amd_pf_nomask_dk<128, 64, 64, 256>;

@@ -3803,6 +3803,24 @@ static int ggml_metal_op_flash_attn_ext_amd(ggml_metal_op_t ctx, int idx, float 
         /*.nbb_d   =*/ nb3,
     };
 
+    // register-tiled prefill (ToshLLM pf_amd); GGML_METAL_FA_PF_DISABLE keeps the tile kernel
+    static const bool pf_disabled = getenv("GGML_METAL_FA_PF_DISABLE") != nullptr;
+    if (!pf_disabled && ne01 >= 32 && (dk == 64 || dk == 128 || dk == 256)) {
+        auto pipeline_pf = ggml_metal_library_get_pipeline_flash_attn_ext_amd_pf(lib, dk, has_mask);
+
+        ggml_metal_encoder_set_pipeline(enc, pipeline_pf);
+        ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+        ggml_metal_encoder_set_buffer  (enc, bid_q,   1);
+        ggml_metal_encoder_set_buffer  (enc, bid_k,   2);
+        ggml_metal_encoder_set_buffer  (enc, bid_v,   3);
+        ggml_metal_encoder_set_buffer  (enc, bid_m,   4);
+        ggml_metal_encoder_set_buffer  (enc, bid_dst, 5);
+        ggml_metal_encoder_set_threadgroup_memory_size(enc, 0, 0);
+        ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + pipeline_pf.nr0 - 1)/pipeline_pf.nr0, ne02, ne03, 32, 8, 1);
+
+        return 1;
+    }
+
     auto pipeline = ggml_metal_library_get_pipeline_flash_attn_ext_amd_tile(lib, dk, 64, has_mask);
 
     // 与 fa_amd.metal 的 LDS 布局严格一致：kt + sw + mps + lps + mst + cst + lst

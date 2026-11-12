@@ -2163,6 +2163,35 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_a
     return res;
 }
 
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_amd_pf(
+        ggml_metal_library_t lib,
+        int32_t dk,
+        bool    has_mask) {
+    char base[256];
+    char name[256];
+
+    // the no-mask variant only exists for dk 64/128; dk 256 runs the masked one with the mask off
+    if (!has_mask && dk != 256) {
+        snprintf(base, 256, "kernel_flash_attn_ext_amd_pf_nomask_dk%d", dk);
+    } else {
+        snprintf(base, 256, "kernel_flash_attn_ext_amd_pf_dk%d", dk);
+    }
+    snprintf(name, 256, "%s_mask=%d", base, has_mask ? 1 : 0);
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        ggml_metal_cv_t cv = ggml_metal_cv_init();
+        ggml_metal_cv_set_bool(cv, has_mask, FC_FLASH_ATTN_EXT_AMD + 0);
+        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+        ggml_metal_cv_free(cv);
+    }
+
+    // queries per threadgroup: the O accumulators stay near 32 registers per thread
+    res.nr0 = dk == 256 ? 32 : 64;
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_amd_reduce(
         ggml_metal_library_t lib,
         int32_t dk) {
