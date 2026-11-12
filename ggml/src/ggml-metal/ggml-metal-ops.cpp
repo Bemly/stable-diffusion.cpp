@@ -5188,7 +5188,29 @@ int ggml_metal_op_conv_2d(ggml_metal_op_t ctx, int idx) {
         /*.d1   =*/ d1,
     };
 
-    auto pipeline = ggml_metal_library_get_pipeline_conv_2d(lib, op);
+    // the implicit GEMM kernel runs on the subgroup-free path the manual mul_mm uses;
+    // GGML_METAL_CONV2D_NAIVE keeps the one-output-per-thread kernel for comparison
+    const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx->dev);
+    static const bool force_naive = getenv("GGML_METAL_CONV2D_NAIVE") != nullptr;
+    const bool igemm = props_dev->use_mm_manual && !force_naive;
+
+    auto pipeline = ggml_metal_library_get_pipeline_conv_2d(lib, op, igemm);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
+
+    if (igemm) {
+        GGML_ASSERT(pipeline.smem <= props_dev->max_theadgroup_memory_size);
+        ggml_metal_encoder_set_threadgroup_memory_size(enc, pipeline.smem, 0);
+
+        const int64_t n_p = (int64_t) ne0*ne1;
+        ggml_metal_encoder_dispatch_threadgroups(enc, (ne03 + pipeline.nr1 - 1)/pipeline.nr1, (n_p + pipeline.nr0 - 1)/pipeline.nr0, ne3, 32, pipeline.nsg, 1);
+
+        return 1;
+    }
 
     int nth = ggml_metal_pipeline_max_theads_per_threadgroup(pipeline);
     nth = std::min(nth, 256);
@@ -5199,12 +5221,6 @@ int ggml_metal_op_conv_2d(ggml_metal_op_t ctx, int idx) {
     uint64_t tg = (n_out + nth - 1)/nth;
     tg = std::max<uint64_t>(tg, 1);
     tg = std::min<uint64_t>(tg, (uint64_t) std::numeric_limits<int>::max());
-
-    ggml_metal_encoder_set_pipeline(enc, pipeline);
-    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
-    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
-    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
-    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
 
     ggml_metal_encoder_dispatch_threadgroups(enc, tg, 1, 1, nth, 1, 1);
 

@@ -2549,7 +2549,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_transpose_2
     return res;
 }
 
-ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_2d(ggml_metal_library_t lib, const ggml_tensor * op) {
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_2d(ggml_metal_library_t lib, const ggml_tensor * op, bool igemm) {
     assert(op->op == GGML_OP_CONV_2D);
 
     GGML_ASSERT(ggml_is_contiguous(op->src[0]));
@@ -2560,12 +2560,20 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_2d(ggml_met
     char base[256];
     char name[256];
 
-    snprintf(base, 256, "kernel_conv_2d_%s_%s", ggml_type_name(op->src[0]->type), ggml_type_name(op->src[1]->type));
+    snprintf(base, 256, "kernel_conv_2d%s_%s_%s", igemm ? "_igemm" : "", ggml_type_name(op->src[0]->type), ggml_type_name(op->src[1]->type));
     snprintf(name, 256, "%s", base);
 
     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
     if (!res.pipeline) {
         res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
+    }
+
+    if (igemm) {
+        // 64x64 output tile over 8 subgroups; A and B tiles of 64x32 half, ping-ponged
+        res.nr0  = 64;
+        res.nr1  = 64;
+        res.nsg  = 8;
+        res.smem = 16384;
     }
 
     return res;

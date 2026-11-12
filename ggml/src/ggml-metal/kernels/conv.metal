@@ -274,6 +274,151 @@ kernel void kernel_conv_2d<half>(
         uint3   tpitg[[thread_position_in_threadgroup]],
         uint3     ntg[[threads_per_threadgroup]]);
 
+// Implicit GEMM for GPUs without simdgroup matrix: out[p][oc] = sum_k patch[p][k] * w[oc][k] with
+// p = oh*OW + ow and k = (ic*KH + ky)*KW + kx, gathered straight from the image so no im2col
+// buffer is materialized. 64 pixels x 64 output channels per threadgroup of 256 threads, K in
+// steps of 32 through two ping-pong 8 KiB tiles, compute loop and tile layout of the manual
+// kernel_mul_mm path (8x8 blocks, (k, k+1) pairs contiguous). The naive kernel above needs
+// seconds for one VAE decoder conv at 1024x1536, past the command buffer watchdog.
+template <typename TK>
+kernel void kernel_conv_2d_igemm(
+        constant ggml_metal_kargs_conv_2d & args,
+        device const char * weights,
+        device const char * src,
+        device       char * dst,
+        threadgroup  char * shmem [[threadgroup(0)]],
+        uint3  tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    constexpr int NR = 64;
+    constexpr int NK = 32;
+
+    const int32_t P   = args.OH*args.OW;
+    const int32_t KHW = args.KH*args.KW;
+    const int32_t K   = args.IC*KHW;
+
+    const int32_t oc0 = tgpig.x*NR;
+    const int32_t p0  = tgpig.y*NR;
+    const int32_t n   = tgpig.z;
+
+    // each thread loads pixel and output channel tiitg%64 at 8 consecutive k from 8*(tiitg/64)
+    const short lrow = tiitg % NR;
+    const short lkq  = tiitg / NR;
+
+    const int32_t lp = p0 + lrow;
+    const bool    lp_ok = lp < P;
+    const int32_t loh = lp_ok ? lp / args.OW : 0;
+    const int32_t low = lp_ok ? lp % args.OW : 0;
+    const int32_t base_y = loh*args.s1 - args.p1;
+    const int32_t base_x = low*args.s0 - args.p0;
+
+    const int32_t loc    = oc0 + lrow;
+    const bool    loc_ok = loc < args.OC;
+
+    device const char * src_n = src + (uint64_t) n*args.nb13;
+    device const char * w_oc  = weights + (uint64_t) (loc_ok ? loc : 0)*args.nb03;
+
+    const short lane = tiitg % 32;
+    const short lr   = lane % 8;
+    const short lc   = lane / 8;
+    const short vsg  = tiitg / 32;
+
+    float2 acc[4][4];
+    for (short i = 0; i < 4; i++) { for (short j = 0; j < 4; j++) { acc[i][j] = 0.f; } }
+
+    for (int32_t loop_k = 0; loop_k < K; loop_k += NK) {
+        const short db = (loop_k/NK) & 1;
+        threadgroup half * sa = (threadgroup half *)(shmem + db*8192);
+        threadgroup half * sb = (threadgroup half *)(shmem + db*8192 + 4096);
+
+        int32_t k  = loop_k + 8*lkq;
+        int32_t ic = k / KHW;
+        int32_t r  = k - ic*KHW;
+        int32_t ky = r / args.KW;
+        int32_t kx = r - ky*args.KW;
+
+        half va[8];
+        half vb[8];
+        FOR_UNROLL (short i = 0; i < 8; i++) {
+            const bool k_ok = k + i < K;
+
+            const int32_t iy = base_y + ky*args.d1;
+            const int32_t ix = base_x + kx*args.d0;
+            const bool in_ok = k_ok && lp_ok && iy >= 0 && iy < args.IH && ix >= 0 && ix < args.IW;
+            va[i] = in_ok ? (half) *(device const float *)(src_n + (uint64_t) ic*args.nb12 + (uint64_t) iy*args.nb11 + (uint64_t) ix*args.nb10) : (half) 0.0f;
+
+            const bool w_ok = k_ok && loc_ok;
+            vb[i] = w_ok ? (half) *(device const TK *)(w_oc + (uint64_t) ic*args.nb02 + (uint64_t) ky*args.nb01 + (uint64_t) kx*args.nb00) : (half) 0.0f;
+
+            if (++kx == args.KW) {
+                kx = 0;
+                if (++ky == args.KH) {
+                    ky = 0;
+                    ++ic;
+                }
+            }
+        }
+
+        // element (row, k) of a tile sits at 64*(8*(k/8) + row/8) + 8*(row%8) + k%8
+        threadgroup half * da = sa + 64*(8*lkq + lrow/8) + 8*(lrow%8);
+        threadgroup half * dbp = sb + 64*(8*lkq + lrow/8) + 8*(lrow%8);
+        *(threadgroup half4 *)(da + 0)  = half4(va[0], va[1], va[2], va[3]);
+        *(threadgroup half4 *)(da + 4)  = half4(va[4], va[5], va[6], va[7]);
+        *(threadgroup half4 *)(dbp + 0) = half4(vb[0], vb[1], vb[2], vb[3]);
+        *(threadgroup half4 *)(dbp + 4) = half4(vb[4], vb[5], vb[6], vb[7]);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma = sa + 4*64*(vsg%2);
+        threadgroup const half * lsmb = sb + 2*64*(vsg/2);
+
+        for (short ik = 0; ik < NK/8; ik++) {
+            FOR_UNROLL (short kk = 0; kk < 8; kk += 2) {
+                half2 av[4];
+                half2 bv[4];
+                for (short rr = 0; rr < 4; rr++) {
+                    av[rr] = *(threadgroup const half2 *)(lsma + 64*rr + 8*lr + kk);
+                }
+                for (short cc = 0; cc < 4; cc++) {
+                    const short col = lc + 4*cc;
+                    bv[cc] = *(threadgroup const half2 *)(lsmb + 64*(col/8) + 8*(col%8) + kk);
+                }
+                for (short rr = 0; rr < 4; rr++) {
+                    for (short cc = 0; cc < 4; cc++) {
+                        acc[rr][cc] = float2(av[rr])*float2(bv[cc]) + acc[rr][cc];
+                    }
+                }
+            }
+
+            lsma += 8*64;
+            lsmb += 8*64;
+        }
+    }
+
+    const int32_t base_row = p0  + 32*(vsg & 1);
+    const int32_t base_col = oc0 + 16*(vsg >> 1);
+    device char * dst_n = dst + (uint64_t) n*args.nb3;
+    for (short rr = 0; rr < 4; rr++) {
+        const int32_t p = base_row + 8*rr + lr;
+        if (p >= P) {
+            continue;
+        }
+        const int32_t oh = p / args.OW;
+        const int32_t ow = p - oh*args.OW;
+        device char * dst_p = dst_n + (uint64_t) oh*args.nb1 + (uint64_t) ow*args.nb0;
+        for (short cc = 0; cc < 4; cc++) {
+            const int32_t oc = base_col + lc + 4*cc;
+            if (oc < args.OC) {
+                *(device float *)(dst_p + (uint64_t) oc*args.nb2) = acc[rr][cc].x + acc[rr][cc].y;
+            }
+        }
+    }
+}
+
+typedef decltype(kernel_conv_2d_igemm<half>) kernel_conv_2d_igemm_t;
+
+template [[host_name("kernel_conv_2d_igemm_f32_f32")]] kernel kernel_conv_2d_igemm_t kernel_conv_2d_igemm<float>;
+template [[host_name("kernel_conv_2d_igemm_f16_f32")]] kernel kernel_conv_2d_igemm_t kernel_conv_2d_igemm<half>;
+
 typedef void (conv_transpose_1d_t)(
         constant ggml_metal_kargs_conv_transpose_1d & args,
         device const float * src0,
