@@ -12,12 +12,31 @@ Pass the four MiniMax-H3 components separately:
 - `--diffusion-model`: MiniMax-H3 diffusion transformer
 - `--vae`: MiniMax-H3 video VAE
 - `--audio-vae`: MiniMax-H3 audio VAE
-- `--llm`: the MiniMax-H3 Qwen3-VL-32B text encoder checkpoint
+- `--llm`: the MiniMax-H3 Qwen3-VL-32B text encoder, or Qwen3-VL-4B with the P-H3 text connector
 
-The text encoder must be the MiniMax-H3 variant: Qwen3-VL-32B truncated to 50
+For the 32B option, use the MiniMax-H3 variant: Qwen3-VL-32B truncated to 50
 language layers and exported without the final language-model normalization.
-Its Qwen3-VL vision tower, including the three DeepStack mergers, must also be
-present. If the vision tower is stored separately, pass it with `--llm_vision`.
+
+For the smaller 4B option, pass the P-H3-Image text encoder, which bundles the
+connector, with `--llm`. Alternatively, pass Qwen3-VL-4B with `--llm` and the
+[separate P-H3 text connector](https://huggingface.co/PrunaAI/P-H3-Image/blob/main/text_connector/diffusion_pytorch_model.safetensors)
+with `--embeddings-connectors`. For example, replace the `--llm` argument in the
+commands below with either:
+
+```sh
+--llm ..\models\text_encoders\p-h3-image_text_encoder_int8_convrot.safetensors
+```
+
+or:
+
+```sh
+--llm ..\models\text_encoders\qwen3vl_4b.gguf --embeddings-connectors ..\models\text_encoders\p-h3-image_text_connector.safetensors
+```
+
+Reference-image and reference-video conditioning needs the matching encoder's
+Qwen3-VL vision tower, including the three DeepStack mergers. If stored
+separately, pass it with `--llm_vision`. Keep using the MiniMax-H3 video and audio
+VAEs with either text encoder.
 
 Both the original time-embedder DiT and the smaller AdaLN curve-table variant
 are detected from their weights.
@@ -30,6 +49,8 @@ are detected from their weights.
 - Download qwen3vl_32b_minimax_h3
     - safetensors: https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/text_encoders
     - gguf: https://huggingface.co/leejet/MiniMax-H3-GGUF/tree/main
+- Or download the P-H3-Image text encoder (Qwen3-VL-4B with the text connector)
+    - safetensors: https://huggingface.co/PrunaAI/P-H3-Image-Comfy/tree/main/text_encoders
 - Download vae
     - safetensors: https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/vae
 - Download audio vae
@@ -98,6 +119,24 @@ the 32-pixel grid and reports a warning.
 The C API exposes the same inputs through `ref_images`, `ref_videos`, and
 `ref_audios` in `sd_vid_gen_params_t`. Each `sd_ref_video_t` supplies its own
 frame rate and optional soundtrack; non-24-fps inputs are resampled internally.
+
+## Sol-H3-VAE decoding
+
+Pass a [Sol-H3-VAE checkpoint](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/vae)
+with `--vae` to use the distilled video decoder. The ComfyUI FP16 and INT8
+ConvRot checkpoints include the MiniMax-H3 encoder for image and video inputs.
+Supply `--audio-vae` as usual to decode the soundtrack.
+
+Sol decodes the whole clip by default. Use `--vae-tiling` for spatial tiling or
+`--temporal-tiling` for temporal tiling. Either can reduce memory use but may
+affect output quality because the decoder has less context at tile boundaries.
+
+Temporal tiles default to 10 latent frames with 5 latent frames of overlap.
+Set `temporal_tile_frames` and `temporal_tile_overlap` in
+`--extra-tiling-args` to override them. Both must be multiples of 5 latent
+frames, and overlap must be smaller than the tile. The last tile may be shorter.
+Circular decoding requires spatial tiling on each circular axis, with a tile
+size smaller than the input on that axis.
 
 ## Latent hires second pass (two-stage sampling)
 
