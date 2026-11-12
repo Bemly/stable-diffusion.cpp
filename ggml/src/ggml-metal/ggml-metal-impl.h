@@ -1452,8 +1452,8 @@ typedef struct {
 typedef struct {
     int32_t  ne02;        // n_head
     int32_t  ne03;        // n_batch
-    uint64_t nb02;        // dst strides (Q strides reused: valid only when nq == 1 && dk == dv)
-    uint64_t nb03;
+    uint64_t nb02;        // dst head stride (dst nb[1])
+    uint64_t nb03;        // dst batch stride (dst nb[3])
     int32_t  split;
 } ggml_metal_kargs_flash_attn_ext_amd_reduce;
 
