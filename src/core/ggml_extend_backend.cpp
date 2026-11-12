@@ -615,16 +615,16 @@ bool sd_backend_supports_conv_implicit_gemm(ggml_backend_t backend, bool conv3d)
     if (sd_backend_is(backend, "Vulkan") || sd_backend_is(backend, "MUSA")) {
         return true;
     }
-    // CUDA/HIP Conv3d also implements SIMT implicit GEMM; Conv2d requires MMA.
-    if (conv3d) {
-        return sd_backend_is(backend, "CUDA") || sd_backend_is(backend, "ROCm");
-    }
-    // Metal Conv2d is implicit GEMM on GPUs without simdgroup matrix (AMD/Intel Macs);
-    // Apple GPUs keep the naive kernel there.
+    // Metal Conv2d/Conv3d are implicit GEMM on GPUs without simdgroup matrix (AMD/Intel Macs);
+    // Apple GPUs keep the naive kernels there.
     if (sd_backend_is(backend, "MTL")) {
         ggml_backend_dev_t dev = ggml_backend_get_device(backend);
         const char* desc       = dev != nullptr ? ggml_backend_dev_description(dev) : nullptr;
         return desc != nullptr && lower_copy(desc).find("apple") == std::string::npos;
+    }
+    // CUDA/HIP Conv3d also implements SIMT implicit GEMM; Conv2d requires MMA.
+    if (conv3d) {
+        return sd_backend_is(backend, "CUDA") || sd_backend_is(backend, "ROCm");
     }
     return cuda_compiled_arch(backend) >= 750 || sd_backend_supports_hip_mma(backend);
 }

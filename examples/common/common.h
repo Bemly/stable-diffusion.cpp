@@ -179,7 +179,7 @@ struct SDContextParams {
     bool clip_on_cpu            = false;
     bool vae_on_cpu             = false;
     std::string flash_attn_mode = "on";
-    std::string conv_direct_mode;  // Empty selects auto while honoring legacy convolution flags.
+    std::string conv_direct_mode = "on";
     bool sage_attn             = false;
     bool diffusion_conv_direct = false;
     bool vae_conv_direct       = false;

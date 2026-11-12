@@ -749,7 +749,7 @@ ArgOptions SDContextParams::get_options() {
          }},
         {"",
          "--conv-direct",
-         "on|off|auto or diffusion/vae/controlnet assignments (default: auto), e.g. auto,vae=off. Overrides legacy convolution flags",
+         "on|off|auto or diffusion/vae/controlnet assignments (default: on), e.g. on,vae=off. Overrides legacy convolution flags",
          [this](int argc, const char** argv, int index) {
              if (++index >= argc || argv[index][0] == '\0') {
                  LOG_ERROR("--conv-direct requires on, off, auto, or module assignments");
@@ -760,7 +760,7 @@ ArgOptions SDContextParams::get_options() {
          }},
         {"",
          "--flash-attn",
-         "on|off|auto or module assignments (default: auto), e.g. auto,te=off,vae=on. Last repeated option wins",
+         "on|off|auto or module assignments (default: on), e.g. on,te=off. Last repeated option wins",
          [this](int argc, const char** argv, int index) {
              if (++index >= argc) {
                  LOG_ERROR("--flash-attn requires on, off, or auto");
