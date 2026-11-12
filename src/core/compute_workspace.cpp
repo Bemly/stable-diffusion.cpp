@@ -25,6 +25,15 @@ namespace sd {
         }
     }
 
+    // SD_STRICT_GPU=1 refuses a graph that the scheduler placed on the CPU backend. Without
+    // it the fallback is silent, and on a discrete GPU it is worse than failing: the weights
+    // stay in VRAM while the activations live in host memory, so every op pulls them back over
+    // PCIe and a step that takes 18 s on the GPU takes 250 s.
+    static bool strict_gpu_enabled() {
+        static const bool enabled = getenv("SD_STRICT_GPU") != nullptr;
+        return enabled;
+    }
+
     ggml_backend_sched_t ComputeWorkspace::make_scheduler(size_t graph_size) {
         std::vector<ggml_backend_t> backends{backend_};
         backends.insert(backends.end(), extra_backends_.begin(), extra_backends_.end());
@@ -84,6 +93,36 @@ namespace sd {
         if (!ggml_backend_sched_alloc_graph(scheduler_, graph)) {
             release();
             return false;
+        }
+        if (strict_gpu_enabled() && !sd_backend_is_cpu(backend_)) {
+            // the CPU backend has to stay in the scheduler (ggml asserts on it), so the only
+            // way to refuse the fallback is to reject the placement after the split
+            int n_cpu = 0;
+            std::string first;
+            for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+                ggml_tensor* node = ggml_graph_node(graph, i);
+                if (node == nullptr || node->op == GGML_OP_NONE) {
+                    continue;
+                }
+                ggml_backend_t b = ggml_backend_sched_get_tensor_backend(scheduler_, node);
+                if (b != nullptr && sd_backend_is_cpu(b)) {
+                    if (n_cpu == 0) {
+                        first = std::string(ggml_op_name(node->op)) + " '" + ggml_get_name(node) + "'";
+                    }
+                    n_cpu++;
+                }
+            }
+            // a couple of metadata ops (RESHAPE and friends) legitimately run on the CPU and
+            // cost nothing; only refuse when a real slice of the graph moved there
+            const int n_nodes = ggml_graph_n_nodes(graph);
+            if (n_cpu > 8 && n_cpu * 50 > n_nodes) {
+                LOG_ERROR("%s: SD_STRICT_GPU rejected the graph: %d/%d nodes fell back to the "
+                          "CPU backend (first: %s). Unset SD_STRICT_GPU to allow the silent "
+                          "fallback.\n",
+                          __func__, n_cpu, n_nodes, first.c_str());
+                release();
+                return false;
+            }
         }
         active_ = true;
         return true;
