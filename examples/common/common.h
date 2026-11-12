@@ -179,7 +179,7 @@ struct SDContextParams {
     bool clip_on_cpu            = false;
     bool vae_on_cpu             = false;
     std::string flash_attn_mode = "on";
-    std::string conv_direct_mode = "on";  // All modules; auto probing picked per-shape winners that lose on long sequences.
+    std::string conv_direct_mode = "auto,vae=off";  // VAE direct conv exceeds the Metal command-buffer watchdog at 1024x1536.
     bool sage_attn             = false;
     bool diffusion_conv_direct = false;
     bool vae_conv_direct       = false;
