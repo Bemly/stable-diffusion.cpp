@@ -229,6 +229,14 @@ namespace Qwen {
                 auto prefix_k = ctx->load_cache_tensor(cache.name + ".k");
                 auto prefix_v = ctx->load_cache_tensor(cache.name + ".v");
                 GGML_ASSERT(prefix_k != nullptr && prefix_v != nullptr);
+                // flash attention reads F16 anyway: joining in F16 skips widening the prefix and
+                // narrowing the whole sequence again, with each value still rounded once
+                static const bool prefix_f16_off = getenv("TOSH_QWEN21_PREFIX_F16_DISABLE") != nullptr;
+                if (!prefix_f16_off && cache.flash_attn_used != nullptr &&
+                    prefix_k->type == GGML_TYPE_F16 && prefix_v->type == GGML_TYPE_F16) {
+                    k = ggml_cast(ctx->ggml_ctx, k, GGML_TYPE_F16);
+                    v = ggml_cast(ctx->ggml_ctx, v, GGML_TYPE_F16);
+                }
                 if (prefix_k->type != k->type) {
                     prefix_k = ggml_cast(ctx->ggml_ctx, prefix_k, k->type);
                 }

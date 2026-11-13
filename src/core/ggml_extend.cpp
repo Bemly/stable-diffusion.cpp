@@ -661,7 +661,9 @@ ggml_tensor* ggml_ext_attention_ext(GGMLRunnerContext* runner_ctx,
         if (kv_scale != 1.0f) {
             k_in = ggml_ext_scale(runner_ctx, k_in, kv_scale);
         }
-        k_in = ggml_cast(ctx, k_in, GGML_TYPE_F16);
+        if (k_in->type != GGML_TYPE_F16) {
+            k_in = ggml_cast(ctx, k_in, GGML_TYPE_F16);
+        }
 
         if (kv_scale != 1.0f) {
             v_in = ggml_ext_scale(runner_ctx, v_in, kv_scale);
