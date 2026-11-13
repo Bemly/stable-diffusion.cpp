@@ -982,7 +982,9 @@ struct LoraModel : public GGMLRunner {
             }
 
             ggml_tensor* final_tensor;
-            if (model_tensor->type != GGML_TYPE_F32 && model_tensor->type != GGML_TYPE_F16) {
+            // f16 takes the same f32 round trip as the quantized types: the diff is f32, and a
+            // backend without host-visible weights cannot fall back to the CPU for a mixed add.
+            if (model_tensor->type != GGML_TYPE_F32) {
                 final_tensor = ggml_ext_cast_f32(&runner_ctx, model_tensor);
                 final_tensor = ggml_add_inplace(compute_ctx, final_tensor, diff);
                 final_tensor = ggml_cpy(compute_ctx, final_tensor, model_tensor);
@@ -1081,7 +1083,7 @@ public:
                 continue;
             }
 
-            if (weight->type != GGML_TYPE_F32 && weight->type != GGML_TYPE_F16) {
+            if (weight->type != GGML_TYPE_F32) {
                 weight = ggml_ext_cast_f32(runner_ctx, weight);
             }
             weight = ggml_add(ctx, weight, diff);
