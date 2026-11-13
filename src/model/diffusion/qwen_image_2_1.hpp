@@ -180,8 +180,11 @@ namespace Qwen {
 
         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x, ggml_tensor* pe, const std::vector<QwenImage21Segment>& segments, const std::vector<ggml_tensor*>& masks, const QwenImage21PrefixCache& cache) {
             int64_t heads = x->ne[0] / dim_head;
+            // q, k and v read the same activation, which the tile loader rounds to half anyway
+            static const bool qkv_f16_off = getenv("TOSH_QWEN21_QKV_F16_DISABLE") != nullptr;
+            ggml_tensor* xin = !qkv_f16_off && x->type == GGML_TYPE_F32 ? ggml_cast(ctx->ggml_ctx, x, GGML_TYPE_F16) : x;
             auto project  = [&](const char* name) {
-                auto h = std::dynamic_pointer_cast<Linear>(blocks[name])->forward(ctx, x);
+                auto h = std::dynamic_pointer_cast<Linear>(blocks[name])->forward(ctx, xin);
                 return ggml_reshape_4d(ctx->ggml_ctx, h, dim_head, heads, x->ne[1], x->ne[2]);
             };
             auto q = project("to_q");
@@ -260,6 +263,10 @@ namespace Qwen {
             }
             auto to_out = std::dynamic_pointer_cast<Linear>(blocks["to_out.0"]);
             to_out->set_precision_flags(GGML_PRECISION_F32_VULKAN | GGML_PRECISION_F32_ROCM);
+            static const bool out_f16_off = getenv("TOSH_QWEN21_OUT_F16_DISABLE") != nullptr;
+            if (!out_f16_off && result->type == GGML_TYPE_F32 && ggml_is_contiguous(result)) {
+                result = ggml_cast(ctx->ggml_ctx, result, GGML_TYPE_F16);
+            }
             return to_out->forward(ctx, result);
         }
     };
@@ -307,6 +314,10 @@ namespace Qwen {
             static const bool swiglu_off = getenv("TOSH_QWEN21_SWIGLU_DISABLE") != nullptr;
             if (fused != blocks.end() && !swiglu_off) {
                 // silu(gate) * up in one pass: chunking the fused output first copies both halves
+                static const bool gateup_f16_off = getenv("TOSH_QWEN21_GATEUP_F16_DISABLE") != nullptr;
+                if (!gateup_f16_off && h->type == GGML_TYPE_F32) {
+                    h = ggml_cast(ctx->ggml_ctx, h, GGML_TYPE_F16);
+                }
                 auto gate_up = std::dynamic_pointer_cast<Linear>(fused->second)->forward(ctx, h);
                 h            = ggml_swiglu(ctx->ggml_ctx, gate_up);
             } else if (fused != blocks.end()) {
