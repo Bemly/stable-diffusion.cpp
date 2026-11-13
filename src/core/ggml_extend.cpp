@@ -602,7 +602,8 @@ ggml_tensor* ggml_ext_attention_ext(GGMLRunnerContext* runner_ctx,
                                     bool skip_reshape,
                                     bool flash_attn,
                                     float kv_scale,
-                                    bool* used_flash_attn) {
+                                    bool* used_flash_attn,
+                                    bool v_view) {
     auto ctx     = runner_ctx->ggml_ctx;
     auto backend = runner_ctx->backend;
     if (runner_ctx->attn_scale > 0.f) {
@@ -668,13 +669,18 @@ ggml_tensor* ggml_ext_attention_ext(GGMLRunnerContext* runner_ctx,
         if (kv_scale != 1.0f) {
             v_in = ggml_ext_scale(runner_ctx, v_in, kv_scale);
         }
-        v_in       = ggml_permute(ctx, v_in, 0, 2, 1, 3);
-        auto v_f16 = ggml_cast(ctx, v_in, GGML_TYPE_F16);
-        if (!ggml_backend_supports_op(backend, v_f16)) {
-            v_f16 = ggml_cast(ctx, ggml_ext_cont(runner_ctx, v_in), GGML_TYPE_F16);
-        }
-        v_in = v_f16;
-        v_in = ggml_reshape_3d(ctx, v_in, v_in->ne[0], L_k, n_kv_head * N);
+        ggml_tensor* v_src = v_in;
+        auto v_copy        = [&]() {
+            auto v_p   = ggml_permute(ctx, v_src, 0, 2, 1, 3);
+            auto v_f16 = ggml_cast(ctx, v_p, GGML_TYPE_F16);
+            if (!ggml_backend_supports_op(backend, v_f16)) {
+                v_f16 = ggml_cast(ctx, ggml_ext_cont(runner_ctx, v_p), GGML_TYPE_F16);
+            }
+            return ggml_reshape_3d(ctx, v_f16, v_f16->ne[0], L_k, n_kv_head * N);
+        };
+        // the kernel follows v's row and head strides, so the permuted view needs no copy
+        const bool v_as_view = v_view && v_in->type == GGML_TYPE_F16 && N == 1 && !pad_head && kv_scale == 1.0f;
+        v_in                 = v_as_view ? ggml_permute(ctx, v_in, 0, 2, 1, 3) : v_copy();
 
         if (mask_in != nullptr) {
             // ggml_flash_attn_ext expects the mask as a contiguous F16 tensor shaped
@@ -693,6 +699,9 @@ ggml_tensor* ggml_ext_attention_ext(GGMLRunnerContext* runner_ctx,
         }
 
         auto out = ggml_flash_attn_ext(ctx, q_in, k_in, v_in, mask_in, scale / kv_scale, 0, 0);
+        if (v_as_view && !ggml_backend_supports_op(backend, out)) {
+            out = ggml_flash_attn_ext(ctx, q_in, k_in, v_copy(), mask_in, scale / kv_scale, 0, 0);
+        }
         if (!ggml_backend_supports_op(backend, out)) {
             return nullptr;
         }

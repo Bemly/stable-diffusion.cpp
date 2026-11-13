@@ -221,7 +221,8 @@ namespace Qwen {
             }
             auto attend = [&](ggml_tensor* aq, ggml_tensor* ak, ggml_tensor* av, ggml_tensor* mask) {
                 bool used_flash_attn = false;
-                auto out             = ggml_ext_attention_ext(ctx, aq, ak, av, heads, mask, true, ctx->flash_attn_enabled, 1.f, &used_flash_attn);
+                static const bool v_view_off = getenv("TOSH_QWEN21_V_VIEW_DISABLE") != nullptr;
+                auto out             = ggml_ext_attention_ext(ctx, aq, ak, av, heads, mask, true, ctx->flash_attn_enabled, 1.f, &used_flash_attn, !v_view_off);
                 if (cache.flash_attn_used != nullptr) {
                     *cache.flash_attn_used &= used_flash_attn;
                 }

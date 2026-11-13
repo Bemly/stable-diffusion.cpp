@@ -182,7 +182,8 @@ ggml_tensor* ggml_ext_attention_ext(GGMLRunnerContext* runner_ctx,
                                     bool skip_reshape     = false,
                                     bool flash_attn       = false,
                                     float kv_scale        = 1.0f,
-                                    bool* used_flash_attn = nullptr);
+                                    bool* used_flash_attn = nullptr,
+                                    bool v_view           = false);
 
 ggml_tensor* ggml_ext_layer_norm(GGMLRunnerContext* runner_ctx,
                                  ggml_tensor* x,
