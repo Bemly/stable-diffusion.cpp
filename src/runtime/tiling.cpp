@@ -1,7 +1,10 @@
 #include "runtime/tiling.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -201,6 +204,12 @@ sd::Tensor<float> process_tiles_2d(const sd::Tensor<float>& input,
             ++tile_count;
             if (!silent) {
                 pretty_progress(tile_count, num_tiles, (ggml_time_ms() - t1) / 1000.0f);
+            }
+            if (const char* value = getenv("TOSH_VAE_TILE_YIELD_MS")) {
+                const long delay_ms = std::clamp(strtol(value, nullptr, 10), 0L, 1000L);
+                if (delay_ms > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                }
             }
         }
     }
