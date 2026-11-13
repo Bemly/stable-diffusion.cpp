@@ -4375,6 +4375,27 @@ struct ggml_tensor * ggml_rope(
     );
 }
 
+struct ggml_tensor * ggml_rope_table(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * table) {
+    GGML_ASSERT(a->type == GGML_TYPE_F32 && table->type == GGML_TYPE_F32);
+    GGML_ASSERT(a->ne[0] % 2 == 0 && a->ne[3] == 1 && a->nb[0] == sizeof(float));
+    GGML_ASSERT(ggml_is_contiguous(table));
+    GGML_ASSERT(table->ne[0] == 2 && table->ne[1] == 2 && table->ne[2] == a->ne[0]/2 && table->ne[3] == a->ne[2]);
+
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, a->ne[0], a->ne[2], a->ne[1]);
+
+    int32_t params[15] = { /*n_past*/ 0, (int32_t) a->ne[0], GGML_ROPE_TYPE_TABLE };
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_ROPE;
+    result->src[0] = a;
+    result->src[1] = table;
+
+    return result;
+}
+
 struct ggml_tensor * ggml_rope_multi(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,

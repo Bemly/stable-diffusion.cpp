@@ -252,6 +252,7 @@
 #define GGML_ROPE_TYPE_MROPE  8
 #define GGML_ROPE_TYPE_VISION 24
 #define GGML_ROPE_TYPE_IMROPE 40 // binary: 101000
+#define GGML_ROPE_TYPE_TABLE  64 // adjacent pairs rotated by a precomputed [cos, -sin, sin, cos] table
 
 #define GGML_MROPE_SECTIONS   4
 
@@ -1942,6 +1943,13 @@ extern "C" {
     //  other values of n_dims are untested and is undefined behavior
     //  note: unlike MROPE, the theta for each dim is computed differently for each section
     //        in other words, idx used for theta: [0123] for y section, then [0123] for x section
+    // a: [n_dims, n_head, n_pos] f32, table: [2, 2, n_dims/2, n_pos] f32 holding [cos, -sin, sin, cos]
+    // per pair; the result is [n_dims, n_pos, n_head], the layout flash attention reads
+    GGML_API struct ggml_tensor * ggml_rope_table(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * table);
+
     GGML_API struct ggml_tensor * ggml_rope_multi(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,

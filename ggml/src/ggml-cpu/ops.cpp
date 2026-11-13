@@ -6577,11 +6577,41 @@ static void ggml_compute_forward_rope_flt(
     }
 }
 
+static void ggml_compute_forward_rope_table(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0]; // [n_dims, n_head, n_pos]
+    const ggml_tensor * tab  = dst->src[1]; // [2, 2, n_dims/2, n_pos]
+
+    const int64_t n_dims = src0->ne[0];
+    const int64_t n_head = src0->ne[1];
+    const int64_t n_pos  = src0->ne[2];
+
+    for (int64_t r = params->ith; r < n_head*n_pos; r += params->nth) {
+        const int64_t h = r % n_head;
+        const int64_t p = r / n_head;
+        const float * x = (const float *) ((const char *) src0->data + h*src0->nb[1] + p*src0->nb[2]);
+        const float * t = (const float *) ((const char *) tab->data  + p*tab->nb[3]);
+        float       * y = (float       *) ((char       *) dst->data  + p*dst->nb[1]  + h*dst->nb[2]);
+        for (int64_t i = 0; i < n_dims/2; ++i) {
+            const float x0 = x[2*i];
+            const float x1 = x[2*i + 1];
+            y[2*i]     = x0*t[4*i + 0] + x1*t[4*i + 1];
+            y[2*i + 1] = x0*t[4*i + 2] + x1*t[4*i + 3];
+        }
+    }
+}
+
 void ggml_compute_forward_rope(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
 
     const ggml_tensor * src0 = dst->src[0];
+
+    if (((const int32_t *) dst->op_params)[2] == GGML_ROPE_TYPE_TABLE) {
+        ggml_compute_forward_rope_table(params, dst);
+        return;
+    }
 
     switch (src0->type) {
         case GGML_TYPE_F16:

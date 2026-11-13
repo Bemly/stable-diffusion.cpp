@@ -189,8 +189,15 @@ namespace Qwen {
             auto v = project("to_v");
             q      = std::dynamic_pointer_cast<RMSNorm>(blocks["norm_q"])->forward(ctx, q);
             k      = std::dynamic_pointer_cast<RMSNorm>(blocks["norm_k"])->forward(ctx, k);
-            q      = Rope::apply_rope(ctx, q, pe);
-            k      = Rope::apply_rope(ctx, k, pe);
+            // one pass over the table instead of the generic permute/repeat/mul/add chain
+            static const bool rope_table_off = getenv("TOSH_QWEN21_ROPE_TABLE_DISABLE") != nullptr;
+            auto rope = [&](ggml_tensor* t) {
+                const bool table_ok = t->type == GGML_TYPE_F32 && pe->type == GGML_TYPE_F32 && t->ne[3] == 1 &&
+                                      t->nb[0] == sizeof(float) && pe->ne[2] * 2 == t->ne[0] && pe->ne[3] == t->ne[2];
+                return rope_table_off || !table_ok ? Rope::apply_rope(ctx, t, pe) : ggml_rope_table(ctx->ggml_ctx, t, pe);
+            };
+            q      = rope(q);
+            k      = rope(k);
             if (cache.mode == QwenImage21PrefixCache::Mode::STORE) {
                 // Preserve query-first attention evaluation while writing each layer's
                 // prefix before its full-sequence K/V can accumulate across layers.
