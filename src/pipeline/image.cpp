@@ -1142,6 +1142,7 @@ namespace sd::pipeline {
                                           ? sd::randn_like<float>(latents.init_latent, sd->rng)
                                           : sd::Tensor<float>();
 
+            sd::Tensor<float> leftover_latent;
             sd::Tensor<float> x_0 = sd->sample(sd->diffusion_model,
                                                true,
                                                latents.init_latent,
@@ -1168,19 +1169,22 @@ namespace sd::pipeline {
                                                request.cache_params,
                                                true,
                                                {},
-                                               leftover);
+                                               leftover,
+                                               leftover ? &leftover_latent : nullptr);
             int64_t sampling_end  = ggml_time_ms();
             if (!x_0.empty()) {
                 LOG_INFO("sampling completed, taking %.2fs", (sampling_end - sampling_start) * 1.0f / 1000);
+                // Continuable sketch: leftover noisy latent. Preview PNG: denoised estimate in x_0.
                 if (has_latent_out) {
-                    if (!write_latent_file(latent_out, x_0)) {
+                    if (leftover_latent.empty()) {
+                        LOG_ERROR("latent handoff requested but leftover latent is empty");
+                        return false;
+                    }
+                    if (!write_latent_file(latent_out, leftover_latent)) {
                         LOG_ERROR("failed to write latent '%s'", latent_out);
                         return false;
                     }
                     LOG_INFO("wrote latent to '%s'", latent_out);
-                }
-                if (leftover) {
-                    x_0 = sd->denoiser->inverse_noise_scaling(plan.sigmas.back(), x_0);
                 }
                 final_latents.push_back(std::move(x_0));
                 continue;

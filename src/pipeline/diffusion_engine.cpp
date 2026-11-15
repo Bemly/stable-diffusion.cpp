@@ -2392,7 +2392,8 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
                                               const sd_cache_params_t* cache_params,
                                               bool preview_final_step,
                                               const sd::Tensor<float>& video_positions,
-                                              bool return_with_leftover_noise) {
+                                              bool return_with_leftover_noise,
+                                              sd::Tensor<float>* leftover_latent_out) {
     struct RunnerEndOnExit {
         GGMLRunner* runner = nullptr;
         ~RunnerEndOnExit() {
@@ -2981,10 +2982,28 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
 
     auto x0 = std::move(x0_opt);
     sd_sample::log_sample_cache_summary(cache_runtime, steps);
-    // Leftover noise is the sampling-space latent at the last sigma. inverse
-    // scaling is for a finished (terminal-sigma) latent the VAE can decode;
-    // applying it here would make a later step window start from the wrong x.
-    if (inverse_noise_scaling && !return_with_leftover_noise) {
+    // Mid-window stop: keep the noisy sampling-space x for continue, but VAE a
+    // one-shot denoised estimate so the PNG is a sketch preview, not static.
+    if (return_with_leftover_noise) {
+        sd::Tensor<float> leftover = x0;
+        auto preview_opt           = denoise(leftover, sigmas.back(), static_cast<int>(steps));
+        if (preview_opt.pred.empty()) {
+            LOG_ERROR("leftover preview denoise failed");
+            if (control_net) {
+                control_net->free_control_ctx();
+            }
+            return {};
+        }
+        if (leftover_latent_out != nullptr) {
+            *leftover_latent_out = denoiser->process_latent_out(std::move(leftover));
+        }
+        x0 = denoiser->process_latent_out(std::move(preview_opt.pred));
+        if (control_net) {
+            control_net->free_control_ctx();
+        }
+        return x0;
+    }
+    if (inverse_noise_scaling) {
         x0 = denoiser->inverse_noise_scaling(sigmas[sigmas.size() - 1], x0);
     }
     x0 = denoiser->process_latent_out(std::move(x0));

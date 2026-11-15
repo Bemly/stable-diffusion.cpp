@@ -487,7 +487,8 @@ public:
                              const sd_cache_params_t* cache_params,
                              bool preview_final_step,
                              const sd::Tensor<float>& video_positions = {},
-                             bool return_with_leftover_noise          = false);
+                             bool return_with_leftover_noise          = false,
+                             sd::Tensor<float>* leftover_latent_out   = nullptr);
 
     int get_vae_scale_factor();
 
