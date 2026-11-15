@@ -661,6 +661,10 @@ namespace sd::pipeline {
         int64_t t1 = ggml_time_ms();
         LOG_INFO("get_learned_condition completed, taking %.2fs", (t1 - prepare_start_ms) * 1.0f / 1000);
 
+        if (sd->release_te_after_encode) {
+            sd->release_conditioner_weights();
+        }
+
         ImageGenerationEmbeds embeds;
         embeds.img_uncond = std::move(img_uncond);
         embeds.cond       = std::move(cond);

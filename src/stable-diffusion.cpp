@@ -392,6 +392,7 @@ void sd_ctx_params_init(sd_ctx_params_t* sd_ctx_params) {
     sd_ctx_params->disable_segmented_compute = false;
     sd_ctx_params->batched_cfg               = true;
     sd_ctx_params->eager_load                = false;
+    sd_ctx_params->release_te_after_encode   = false;
     sd_ctx_params->enable_mmap               = false;
     sd_ctx_params->flash_attn_mode           = "on";
     sd_ctx_params->conv_direct_mode          = "on";

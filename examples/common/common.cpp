@@ -646,6 +646,10 @@ ArgOptions SDContextParams::get_options() {
          "--taesd-preview-only",
          "prevents usage of taesd for decoding the final image; the VAE keeps encoding / decoding and taesd is only used for step previews",
          true, &taesd_preview_only},
+        {"",
+         "--release-te-after-encode",
+         "unload text-encoder/conditioner params after prompt conditioning so diffusion sampling can reuse that VRAM (Bemly)",
+         true, &release_te_after_encode},
     };
 
     auto on_type_arg = [&](int argc, const char** argv, int index) {
@@ -1087,6 +1091,7 @@ sd_ctx_params_t SDContextParams::to_sd_ctx_params_t() {
     sd_ctx_params.disable_segmented_compute       = disable_segmented_compute;
     sd_ctx_params.batched_cfg                     = batched_cfg;
     sd_ctx_params.eager_load                      = eager_load;
+    sd_ctx_params.release_te_after_encode         = release_te_after_encode;
     sd_ctx_params.backend                         = effective_backend.c_str();
     sd_ctx_params.params_backend                  = effective_params_backend.c_str();
     sd_ctx_params.split_mode                      = split_mode.c_str();

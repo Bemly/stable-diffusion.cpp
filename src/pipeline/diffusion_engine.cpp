@@ -183,6 +183,21 @@ void StableDiffusionGGML::release_diffusion_weights() {
     model_manager->unload_component(ModelComponent::HighNoiseDiffusion);
 }
 
+void StableDiffusionGGML::release_conditioner_weights() {
+    if (model_manager == nullptr) {
+        return;
+    }
+    if (cond_stage_model != nullptr) {
+        cond_stage_model->runner_end();
+    }
+    // Same path as release_diffusion_weights: free conditioner params storage (VRAM/RAM).
+    // Embeddings already live in SDCondition tensors; sampling does not need the TE weights.
+    const size_t before = model_manager->registered_params_size({ModelComponent::Conditioner});
+    model_manager->unload_component(ModelComponent::Conditioner);
+    LOG_INFO("released text-encoder params after conditioning (%.2f MB registered before unload)",
+             before / (1024.f * 1024.f));
+}
+
 bool StableDiffusionGGML::reset_runners(const RunnerGroups& groups) {
     conditioning_cache_->clear();
     conditioning_loras_.clear();
@@ -951,6 +966,7 @@ bool StableDiffusionGGML::init(const sd_ctx_params_t* sd_ctx_params) {
     disable_prefetch          = sd_ctx_params->disable_prefetch;
     disable_segmented_compute = sd_ctx_params->disable_segmented_compute;
     eager_load                = sd_ctx_params->eager_load;
+    release_te_after_encode   = sd_ctx_params->release_te_after_encode;
     backend_spec              = SAFE_STR(sd_ctx_params->backend);
     params_backend_spec       = SAFE_STR(sd_ctx_params->params_backend);
     split_mode_spec           = SAFE_STR(sd_ctx_params->split_mode);

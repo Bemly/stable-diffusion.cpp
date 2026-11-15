@@ -103,6 +103,7 @@ public:
     bool disable_prefetch          = false;
     bool disable_segmented_compute = false;
     bool eager_load                = false;
+    bool release_te_after_encode   = false;
     std::string backend_spec;
     std::string params_backend_spec;
     std::string split_mode_spec;
@@ -117,6 +118,8 @@ public:
 
     // Hand back the video memory the sampler's weights hold, once no sampling pass is left.
     void release_diffusion_weights();
+    // After conditioning embeddings are ready: drop TE/conditioner params so sampling VRAM peaks lower.
+    void release_conditioner_weights();
 
     enum class RunnerGroup { Core,
                              VAE,

@@ -241,6 +241,9 @@ typedef struct {
     const char* max_vram;  // Optional per-device GiB budget for managed weights and runner buffers; 0 uses live free VRAM without an explicit budget
     bool disable_prefetch;  // Disable asynchronous next-segment weight prefetch
     bool eager_load;  // Load all params into the params backend at model-load time instead of lazily on first use
+    // After prompt conditioning, unload TE/conditioner params from VRAM so diffusion can use the card.
+    // Encode still runs on the TE runtime backend (GPU by default); only residency is released.
+    bool release_te_after_encode;
     const char* backend;
     const char* params_backend;
     const char* split_mode;  // weight distribution for multi-device modules: layer (default) or row, or per-module assignments e.g. "diffusion=row"
