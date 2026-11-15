@@ -36,6 +36,10 @@ void RuntimeRoutes::post(const std::string& pattern, httplib::Server::Handler ha
     server_.Post(pattern, pattern.find("/sdcpp/v1/jobs/") != std::string::npos ? handler : protect(handler));
 }
 
+void RuntimeRoutes::del(const std::string& pattern, httplib::Server::Handler handler) {
+    server_.Delete(pattern, protect(handler));
+}
+
 static void set_model_status(ServerRuntime& runtime, const char* state, const json& recipe, const json& selection, const json& error = nullptr) {
     std::lock_guard<std::mutex> lock(runtime.models->status_mutex);
     auto& models            = *runtime.models;

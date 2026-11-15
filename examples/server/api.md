@@ -53,6 +53,9 @@ Native async API for `stable-diffusion.cpp`.
 Current endpoints include:
 
 - `GET /sdcpp/v1/capabilities`
+- `GET /sdcpp/v1/conditioning-cache`
+- `DELETE /sdcpp/v1/conditioning-cache` (`?id=` optional; omit to clear all)
+- `POST /sdcpp/v1/conditioning-cache/purge` (`max_age_seconds` in query or JSON body)
 - `POST /sdcpp/v1/img_gen`
 - `GET /sdcpp/v1/jobs/{id}`
 - `POST /sdcpp/v1/jobs/{id}/cancel`

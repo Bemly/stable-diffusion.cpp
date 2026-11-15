@@ -2,10 +2,25 @@
 #define __SD_CONDITIONING_CONDITIONING_CACHE_H__
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <list>
+#include <sstream>
+#include <string>
 #include <tuple>
+#include <vector>
 
 #include "conditioning/conditioner.hpp"
+
+struct ConditioningCacheEntryInfo {
+    std::string id;
+    std::string prompt;
+    int width     = -1;
+    int height    = -1;
+    int clip_skip = -1;
+    int64_t created_at_unix = 0;
+    int64_t age_seconds     = 0;
+};
 
 class ConditioningCache {
     struct Entry {
@@ -13,9 +28,13 @@ class ConditioningCache {
         std::vector<sd::Tensor<float>> ref_images;
         std::vector<MiniMaxH3PresentationItem> references;
         SDCondition condition;
+        std::chrono::system_clock::time_point created_at;
+        std::string id;
 
-        Entry(const ConditionerParams& input, const SDCondition& output)
-            : params(input), condition(output) {
+        Entry(const ConditionerParams& input, const SDCondition& output, std::string entry_id)
+            : params(input), condition(output),
+              created_at(std::chrono::system_clock::now()),
+              id(std::move(entry_id)) {
             // Request-owned reference pointers must not outlive the request.
             if (input.ref_images != nullptr) {
                 ref_images        = *input.ref_images;
@@ -70,6 +89,23 @@ class ConditioningCache {
         return true;
     }
 
+    static std::string make_id(const ConditionerParams& params) {
+        // Stable enough for UI delete; collisions across ref-image variants are rare here.
+        std::ostringstream oss;
+        oss << std::hex;
+        size_t h = std::hash<std::string>{}(params.text);
+        h ^= (static_cast<size_t>(params.width) << 1);
+        h ^= (static_cast<size_t>(params.height) << 3);
+        h ^= (static_cast<size_t>(params.clip_skip) << 5);
+        h ^= params.zero_out_masked ? 0x9e3779b97f4a7c15ULL : 0;
+        oss << h;
+        return oss.str();
+    }
+
+    static int64_t unix_seconds(std::chrono::system_clock::time_point tp) {
+        return std::chrono::duration_cast<std::chrono::seconds>(tp.time_since_epoch()).count();
+    }
+
 public:
     void set_capacity(size_t capacity) {
         capacity_ = capacity;
@@ -78,8 +114,56 @@ public:
         }
     }
 
+    size_t capacity() const { return capacity_; }
+    size_t size() const { return entries_.size(); }
+
     void clear() {
         entries_.clear();
+    }
+
+    bool erase_id(const std::string& id) {
+        for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+            if (it->id == id) {
+                entries_.erase(it);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    size_t purge_older_than(std::chrono::seconds max_age) {
+        if (max_age.count() < 0) {
+            return 0;
+        }
+        const auto cutoff = std::chrono::system_clock::now() - max_age;
+        size_t removed    = 0;
+        for (auto it = entries_.begin(); it != entries_.end();) {
+            if (it->created_at < cutoff) {
+                it = entries_.erase(it);
+                ++removed;
+            } else {
+                ++it;
+            }
+        }
+        return removed;
+    }
+
+    std::vector<ConditioningCacheEntryInfo> list() const {
+        std::vector<ConditioningCacheEntryInfo> out;
+        out.reserve(entries_.size());
+        const auto now = std::chrono::system_clock::now();
+        for (const auto& entry : entries_) {
+            ConditioningCacheEntryInfo info;
+            info.id               = entry.id;
+            info.prompt           = entry.params.text;
+            info.width            = entry.params.width;
+            info.height           = entry.params.height;
+            info.clip_skip        = entry.params.clip_skip;
+            info.created_at_unix  = unix_seconds(entry.created_at);
+            info.age_seconds      = std::chrono::duration_cast<std::chrono::seconds>(now - entry.created_at).count();
+            out.push_back(std::move(info));
+        }
+        return out;
     }
 
     bool contains(const ConditionerParams& params) const {
@@ -110,7 +194,7 @@ public:
             if (entries_.size() == capacity_) {
                 entries_.pop_back();
             }
-            entries_.emplace_front(params, condition);
+            entries_.emplace_front(params, condition, make_id(params));
             LOG_VERBOSE("conditioning cache stored (%zu/%zu)", entries_.size(), capacity_);
         }
         return condition;

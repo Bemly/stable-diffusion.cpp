@@ -615,6 +615,15 @@ enum sd_cancel_mode_t {
 
 SD_API void sd_cancel_generation(sd_ctx_t* sd_ctx, enum sd_cancel_mode_t mode);
 
+// Warm text-encoder conditioning cache (prompt embeddings kept after encode).
+// sd_conditioning_cache_to_json returns a malloc'd UTF-8 object the caller frees with free().
+// Returns NULL when the context is missing.
+SD_API char* sd_conditioning_cache_to_json(const sd_ctx_t* sd_ctx);
+SD_API void sd_conditioning_cache_clear(sd_ctx_t* sd_ctx);
+SD_API bool sd_conditioning_cache_erase(sd_ctx_t* sd_ctx, const char* id);
+// Drops entries older than max_age_seconds. Negative ages are ignored. Returns removed count, or -1.
+SD_API int sd_conditioning_cache_purge_older_than(sd_ctx_t* sd_ctx, int64_t max_age_seconds);
+
 SD_API void sd_vid_gen_params_init(sd_vid_gen_params_t* sd_vid_gen_params);
 SD_API bool generate_video(sd_ctx_t* sd_ctx,
                            const sd_vid_gen_params_t* sd_vid_gen_params,

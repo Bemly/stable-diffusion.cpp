@@ -23,4 +23,5 @@ public:
 
     void get(const std::string& pattern, httplib::Server::Handler handler);
     void post(const std::string& pattern, httplib::Server::Handler handler);
+    void del(const std::string& pattern, httplib::Server::Handler handler);
 };

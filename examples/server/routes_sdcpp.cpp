@@ -507,6 +507,83 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
         res.set_content(make_capabilities_json(*runtime).dump(), "application/json");
     });
 
+    routes.get("/sdcpp/v1/conditioning-cache", [runtime](const httplib::Request&, httplib::Response& res) {
+        std::lock_guard<std::mutex> lock(*runtime->sd_ctx_mutex);
+        if (runtime->sd_ctx == nullptr) {
+            res.status = 200;
+            res.set_content(R"({"capacity":0,"size":0,"entries":[],"model_loaded":false})", "application/json");
+            return;
+        }
+        char* json = sd_conditioning_cache_to_json(runtime->sd_ctx);
+        if (json == nullptr) {
+            res.status = 200;
+            res.set_content(R"({"capacity":0,"size":0,"entries":[],"model_loaded":true})", "application/json");
+            return;
+        }
+        // Annotate for the app without re-parsing the whole object.
+        std::string body(json);
+        free(json);
+        if (!body.empty() && body.back() == '}') {
+            body.pop_back();
+            body += ",\"model_loaded\":true}";
+        }
+        res.status = 200;
+        res.set_content(body, "application/json");
+    });
+
+    routes.del("/sdcpp/v1/conditioning-cache", [runtime](const httplib::Request& req, httplib::Response& res) {
+        std::lock_guard<std::mutex> lock(*runtime->sd_ctx_mutex);
+        if (runtime->sd_ctx == nullptr) {
+            res.status = 503;
+            res.set_content(R"({"error":"No model is loaded","code":"model_not_loaded"})", "application/json");
+            return;
+        }
+        const std::string id = req.has_param("id") ? req.get_param_value("id") : "";
+        if (id.empty()) {
+            sd_conditioning_cache_clear(runtime->sd_ctx);
+            res.status = 200;
+            res.set_content(R"({"ok":true,"cleared":"all"})", "application/json");
+            return;
+        }
+        const bool erased = sd_conditioning_cache_erase(runtime->sd_ctx, id.c_str());
+        res.status        = erased ? 200 : 404;
+        res.set_content(json({{"ok", erased}, {"id", id}}).dump(), "application/json");
+    });
+
+    routes.post("/sdcpp/v1/conditioning-cache/purge", [runtime](const httplib::Request& req, httplib::Response& res) {
+        std::lock_guard<std::mutex> lock(*runtime->sd_ctx_mutex);
+        if (runtime->sd_ctx == nullptr) {
+            res.status = 503;
+            res.set_content(R"({"error":"No model is loaded","code":"model_not_loaded"})", "application/json");
+            return;
+        }
+        int64_t max_age = -1;
+        if (!req.body.empty()) {
+            try {
+                json body = json::parse(req.body);
+                if (body.is_object() && body.contains("max_age_seconds")) {
+                    max_age = body["max_age_seconds"].get<int64_t>();
+                }
+            } catch (const std::exception& e) {
+                res.status = 400;
+                res.set_content(json({{"error", e.what()}}).dump(), "application/json");
+                return;
+            }
+        }
+        if (req.has_param("max_age_seconds")) {
+            max_age = std::stoll(req.get_param_value("max_age_seconds"));
+        }
+        if (max_age < 0) {
+            res.status = 400;
+            res.set_content(R"({"error":"max_age_seconds is required"})", "application/json");
+            return;
+        }
+        const int removed = sd_conditioning_cache_purge_older_than(runtime->sd_ctx, max_age);
+        res.status        = 200;
+        res.set_content(json({{"ok", true}, {"removed", removed}, {"max_age_seconds", max_age}}).dump(),
+                        "application/json");
+    });
+
     routes.post("/sdcpp/v1/upscale", [runtime](const httplib::Request& req, httplib::Response& res) {
         try {
             if (req.body.empty()) {

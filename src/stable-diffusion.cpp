@@ -6,11 +6,17 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "conditioning/conditioning_cache.h"
 #include "core/ggml_extend.h"
 #include "core/util.h"
 #include "pipeline/diffusion_engine.h"
 #include "pipeline/generation.h"
 #include "pipeline/request.h"
+
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <sstream>
 
 #define NONE_STR "NONE"
 
@@ -750,6 +756,93 @@ SD_API void sd_cancel_generation(sd_ctx_t* sd_ctx, enum sd_cancel_mode_t mode) {
         }
         sd_ctx->sd->set_cancel_flag(mode);
     }
+}
+
+static std::string json_escape(const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (unsigned char c : value) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"':  out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    return out;
+}
+
+SD_API char* sd_conditioning_cache_to_json(const sd_ctx_t* sd_ctx) {
+    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || sd_ctx->sd->conditioning_cache_ == nullptr) {
+        return nullptr;
+    }
+    std::lock_guard<std::recursive_mutex> lock(sd_ctx->sd->execution_mutex);
+    const auto* cache = sd_ctx->sd->conditioning_cache_.get();
+    const auto entries = cache->list();
+    std::ostringstream oss;
+    oss << "{\"capacity\":" << cache->capacity()
+        << ",\"size\":" << cache->size()
+        << ",\"entries\":[";
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const auto& e = entries[i];
+        if (i) {
+            oss << ',';
+        }
+        oss << "{\"id\":\"" << json_escape(e.id) << "\""
+            << ",\"prompt\":\"" << json_escape(e.prompt) << "\""
+            << ",\"width\":" << e.width
+            << ",\"height\":" << e.height
+            << ",\"clip_skip\":" << e.clip_skip
+            << ",\"created_at\":" << e.created_at_unix
+            << ",\"age_seconds\":" << e.age_seconds
+            << '}';
+    }
+    oss << "]}";
+    const std::string json = oss.str();
+    char* out              = static_cast<char*>(std::malloc(json.size() + 1));
+    if (out == nullptr) {
+        return nullptr;
+    }
+    std::memcpy(out, json.c_str(), json.size() + 1);
+    return out;
+}
+
+SD_API void sd_conditioning_cache_clear(sd_ctx_t* sd_ctx) {
+    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || sd_ctx->sd->conditioning_cache_ == nullptr) {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(sd_ctx->sd->execution_mutex);
+    sd_ctx->sd->conditioning_cache_->clear();
+}
+
+SD_API bool sd_conditioning_cache_erase(sd_ctx_t* sd_ctx, const char* id) {
+    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || sd_ctx->sd->conditioning_cache_ == nullptr ||
+        id == nullptr || id[0] == '\0') {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(sd_ctx->sd->execution_mutex);
+    return sd_ctx->sd->conditioning_cache_->erase_id(id);
+}
+
+SD_API int sd_conditioning_cache_purge_older_than(sd_ctx_t* sd_ctx, int64_t max_age_seconds) {
+    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || sd_ctx->sd->conditioning_cache_ == nullptr) {
+        return -1;
+    }
+    if (max_age_seconds < 0) {
+        return 0;
+    }
+    std::lock_guard<std::recursive_mutex> lock(sd_ctx->sd->execution_mutex);
+    return static_cast<int>(sd_ctx->sd->conditioning_cache_->purge_older_than(
+        std::chrono::seconds(max_age_seconds)));
 }
 
 void free_sd_audio(sd_audio_t* audio) {
