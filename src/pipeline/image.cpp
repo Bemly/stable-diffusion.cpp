@@ -3,7 +3,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 
 #include "core/rng.hpp"
@@ -918,6 +921,76 @@ namespace sd::pipeline {
         return {};
     }
 
+    static bool write_latent_file(const char* path, const sd::Tensor<float>& latent) {
+        FILE* file = std::fopen(path, "wb");
+        if (file == nullptr) {
+            return false;
+        }
+        const char magic[4]          = {'S', 'D', 'L', 'T'};
+        const uint32_t version       = 1;
+        const uint32_t n_dims        = static_cast<uint32_t>(latent.shape().size());
+        const uint32_t dtype         = 1;
+        const uint64_t count         = static_cast<uint64_t>(latent.numel());
+        bool ok                      = std::fwrite(magic, 1, 4, file) == 4 &&
+                      std::fwrite(&version, sizeof(version), 1, file) == 1 &&
+                      std::fwrite(&n_dims, sizeof(n_dims), 1, file) == 1;
+        for (int64_t dim : latent.shape()) {
+            ok = ok && std::fwrite(&dim, sizeof(dim), 1, file) == 1;
+        }
+        ok = ok && std::fwrite(&dtype, sizeof(dtype), 1, file) == 1 &&
+             std::fwrite(&count, sizeof(count), 1, file) == 1 &&
+             std::fwrite(latent.data(), sizeof(float), static_cast<size_t>(latent.numel()), file) == static_cast<size_t>(latent.numel());
+        std::fclose(file);
+        return ok;
+    }
+
+    static std::optional<sd::Tensor<float>> read_latent_file(const char* path) {
+        FILE* file = std::fopen(path, "rb");
+        if (file == nullptr) {
+            return std::nullopt;
+        }
+        char magic[4] = {};
+        uint32_t version = 0;
+        uint32_t n_dims  = 0;
+        if (std::fread(magic, 1, 4, file) != 4 || std::memcmp(magic, "SDLT", 4) != 0 ||
+            std::fread(&version, sizeof(version), 1, file) != 1 || version != 1 ||
+            std::fread(&n_dims, sizeof(n_dims), 1, file) != 1 || n_dims == 0 || n_dims > 8) {
+            std::fclose(file);
+            return std::nullopt;
+        }
+        std::vector<int64_t> shape(n_dims);
+        if (std::fread(shape.data(), sizeof(int64_t), n_dims, file) != n_dims) {
+            std::fclose(file);
+            return std::nullopt;
+        }
+        uint32_t dtype = 0;
+        uint64_t count = 0;
+        if (std::fread(&dtype, sizeof(dtype), 1, file) != 1 || dtype != 1 ||
+            std::fread(&count, sizeof(count), 1, file) != 1) {
+            std::fclose(file);
+            return std::nullopt;
+        }
+        int64_t numel = 1;
+        for (int64_t dim : shape) {
+            if (dim <= 0 || numel > (INT64_C(1) << 32) / dim) {
+                std::fclose(file);
+                return std::nullopt;
+            }
+            numel *= dim;
+        }
+        if (count != static_cast<uint64_t>(numel)) {
+            std::fclose(file);
+            return std::nullopt;
+        }
+        std::vector<float> data(static_cast<size_t>(numel));
+        if (std::fread(data.data(), sizeof(float), static_cast<size_t>(numel), file) != static_cast<size_t>(numel)) {
+            std::fclose(file);
+            return std::nullopt;
+        }
+        std::fclose(file);
+        return sd::Tensor<float>(std::move(shape), std::move(data));
+    }
+
     bool generate_image(StableDiffusionGGML* sd,
                         const sd_img_gen_params_t* sd_img_gen_params,
                         sd_image_t** images_out,
@@ -967,6 +1040,36 @@ namespace sd::pipeline {
         ImageVaeAxesGuard axes_guard(sd, sd_img_gen_params, request);
 
         SamplePlan plan(sd, sd_img_gen_params, request);
+        const int full_steps = static_cast<int>(plan.sigmas.size()) - 1;
+        const int start_step = sd_img_gen_params->start_at_step;
+        const int end_step   = sd_img_gen_params->end_at_step < 0 ? full_steps : sd_img_gen_params->end_at_step;
+        const bool slice_steps    = start_step != 0 || end_step != full_steps;
+        const bool leftover       = end_step < full_steps;
+        const char* latent_in     = sd_img_gen_params->latent_in_path;
+        const char* latent_out    = sd_img_gen_params->latent_out_path;
+        const bool has_latent_in  = latent_in != nullptr && latent_in[0] != '\0';
+        const bool has_latent_out = latent_out != nullptr && latent_out[0] != '\0';
+        if (start_step < 0 || end_step <= start_step || end_step > full_steps || full_steps <= 0) {
+            LOG_ERROR("invalid step window %d..%d of %d", start_step, end_step, full_steps);
+            return false;
+        }
+        if ((slice_steps || has_latent_in || has_latent_out || !sd_img_gen_params->add_noise) &&
+            sd_img_gen_params->init_image.data != nullptr) {
+            LOG_ERROR("step window / latent handoff cannot be combined with an init image");
+            return false;
+        }
+        if ((has_latent_in || has_latent_out) && request.batch_count != 1) {
+            LOG_ERROR("latent handoff requires batch_count 1");
+            return false;
+        }
+        if (!sd_img_gen_params->add_noise && !has_latent_in) {
+            LOG_ERROR("add_noise off requires a latent input");
+            return false;
+        }
+        if (request.hires.enabled && (slice_steps || has_latent_in || has_latent_out)) {
+            LOG_ERROR("hires fix cannot be combined with a step window or latent handoff");
+            return false;
+        }
         sd->generation_progress.report("preparing", "inputs");
         auto latents_opt = prepare_image_generation_latents(sd,
                                                             sd_img_gen_params,
@@ -988,6 +1091,32 @@ namespace sd::pipeline {
             return false;
         }
         ImageGenerationEmbeds embeds = std::move(*embeds_opt);
+        if (slice_steps) {
+            if (static_cast<size_t>(end_step) >= plan.sigmas.size()) {
+                LOG_ERROR("step window exceeds the sigma schedule");
+                return false;
+            }
+            plan.sigmas       = std::vector<float>(plan.sigmas.begin() + start_step, plan.sigmas.begin() + end_step + 1);
+            plan.sample_steps = static_cast<int>(plan.sigmas.size()) - 1;
+            LOG_INFO("sampling steps %d..%d of %d (leftover noise: %s)",
+                     start_step,
+                     end_step,
+                     full_steps,
+                     leftover ? "yes" : "no");
+        }
+        if (has_latent_in) {
+            auto loaded = read_latent_file(latent_in);
+            if (!loaded.has_value()) {
+                LOG_ERROR("failed to read latent '%s'", latent_in);
+                return false;
+            }
+            if (loaded->shape() != latents.init_latent.shape()) {
+                LOG_ERROR("latent shape does not match this model and size");
+                return false;
+            }
+            latents.init_latent = std::move(*loaded);
+            LOG_INFO("loaded latent from '%s'", latent_in);
+        }
         std::vector<sd::Tensor<float>> final_latents;
         int64_t denoise_start = ggml_time_ms();
         for (int b = 0; b < request.batch_count; b++) {
@@ -1009,7 +1138,9 @@ namespace sd::pipeline {
 
             sd->rng->manual_seed(cur_seed);
             sd->sampler_rng->manual_seed(cur_seed);
-            sd::Tensor<float> noise = sd::randn_like<float>(latents.init_latent, sd->rng);
+            sd::Tensor<float> noise = sd_img_gen_params->add_noise
+                                          ? sd::randn_like<float>(latents.init_latent, sd->rng)
+                                          : sd::Tensor<float>();
 
             sd::Tensor<float> x_0 = sd->sample(sd->diffusion_model,
                                                true,
@@ -1035,10 +1166,22 @@ namespace sd::pipeline {
                                                0,
                                                static_cast<float>(request.fps),
                                                request.cache_params,
-                                               true);
+                                               true,
+                                               {},
+                                               leftover);
             int64_t sampling_end  = ggml_time_ms();
             if (!x_0.empty()) {
                 LOG_INFO("sampling completed, taking %.2fs", (sampling_end - sampling_start) * 1.0f / 1000);
+                if (has_latent_out) {
+                    if (!write_latent_file(latent_out, x_0)) {
+                        LOG_ERROR("failed to write latent '%s'", latent_out);
+                        return false;
+                    }
+                    LOG_INFO("wrote latent to '%s'", latent_out);
+                }
+                if (leftover) {
+                    x_0 = sd->denoiser->inverse_noise_scaling(plan.sigmas.back(), x_0);
+                }
                 final_latents.push_back(std::move(x_0));
                 continue;
             }

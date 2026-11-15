@@ -1145,6 +1145,21 @@ ArgOptions SDGenerationParams::get_options() {
          0,
          &init_image_path},
         {"",
+         "--latent-in",
+         "path to a sampling-space latent saved by --latent-out (KSampler continue)",
+         0,
+         &latent_in_path},
+        {"",
+         "--latent-out",
+         "write the sampling-space latent here when the step window ends",
+         0,
+         &latent_out_path},
+        {"",
+         "--add-noise",
+         "on (default) mixes fresh noise at the window start; off keeps --latent-in as-is",
+         0,
+         &add_noise},
+        {"",
          "--end-img",
          "path to the end image, required by flf2v",
          0,
@@ -1233,6 +1248,14 @@ ArgOptions SDGenerationParams::get_options() {
          "--steps",
          "number of sample steps (default: 20)",
          &sample_params.sample_steps},
+        {"",
+         "--start-at-step",
+         "first step of the full --steps schedule to run (default: 0)",
+         &start_at_step},
+        {"",
+         "--end-at-step",
+         "step of the full --steps schedule to stop at (default: -1 = --steps)",
+         &end_at_step},
         {"",
          "--high-noise-steps",
          "(high noise) number of sample steps (default: -1 = auto)",
@@ -2720,6 +2743,51 @@ bool SDGenerationParams::validate(SDMode mode) {
         return false;
     }
 
+    {
+        std::string noise = add_noise;
+        for (char& c : noise) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (noise.empty()) {
+            noise = "on";
+        }
+        if (noise != "on" && noise != "off") {
+            LOG_ERROR("error: --add-noise must be on or off");
+            return false;
+        }
+        add_noise          = noise;
+        const bool window  = start_at_step != 0 || end_at_step >= 0;
+        const bool handoff = !latent_in_path.empty() || !latent_out_path.empty() || noise == "off";
+        if (start_at_step < 0 || end_at_step < -1) {
+            LOG_ERROR("error: step window is out of range");
+            return false;
+        }
+        if (end_at_step >= 0 && (end_at_step > sample_params.sample_steps || start_at_step >= end_at_step)) {
+            LOG_ERROR("error: need 0 <= start-at-step < end-at-step <= steps");
+            return false;
+        }
+        if ((window || handoff) && mode != IMG_GEN) {
+            LOG_ERROR("error: step window and latent handoff require img_gen mode");
+            return false;
+        }
+        if (handoff && batch_count != 1) {
+            LOG_ERROR("error: latent handoff requires --batch-count 1");
+            return false;
+        }
+        if (noise == "off" && latent_in_path.empty()) {
+            LOG_ERROR("error: --add-noise off requires --latent-in");
+            return false;
+        }
+        if ((window || handoff) && !init_image_path.empty()) {
+            LOG_ERROR("error: step window / latent handoff cannot be combined with --init-img");
+            return false;
+        }
+        if ((window || handoff) && hires_enabled) {
+            LOG_ERROR("error: hires fix cannot be combined with a step window or latent handoff");
+            return false;
+        }
+    }
+
     if (strength < 0.f || strength > 1.f) {
         LOG_ERROR("error: can only work with strength in [0.0, 1.0]\n");
         return false;
@@ -2930,6 +2998,11 @@ sd_img_gen_params_t SDGenerationParams::to_sd_img_gen_params_t() {
     params.circular_x                = circular || circular_x;
     params.circular_y                = circular || circular_y;
     params.image_preprocess          = {image_preprocess.c_str()};
+    params.start_at_step             = start_at_step;
+    params.end_at_step               = end_at_step;
+    params.add_noise                 = add_noise != "off";
+    params.latent_in_path            = latent_in_path.empty() ? nullptr : latent_in_path.c_str();
+    params.latent_out_path           = latent_out_path.empty() ? nullptr : latent_out_path.c_str();
     return params;
 }
 

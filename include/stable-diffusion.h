@@ -461,6 +461,13 @@ typedef struct {
     bool circular_y;
     sd_image_preprocess_params_t image_preprocess;
     enum sd_control_type_t control_type;
+    // Partial schedule (Comfy KSampler Advanced). Defaults keep a full run:
+    // start 0, end -1 (= sample_steps), add_noise on, no latent files.
+    int start_at_step;
+    int end_at_step;
+    bool add_noise;
+    const char* latent_in_path;
+    const char* latent_out_path;
 } sd_img_gen_params_t;
 
 typedef struct {

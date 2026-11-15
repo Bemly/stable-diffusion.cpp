@@ -226,6 +226,11 @@ struct SDGenerationParams {
     bool embed_image_metadata = true;
 
     std::string init_image_path;
+    std::string latent_in_path;
+    std::string latent_out_path;
+    int start_at_step = 0;
+    int end_at_step   = -1;
+    std::string add_noise = "on";
     std::string end_image_path;
     std::string mask_image_path;
     std::string control_image_path;

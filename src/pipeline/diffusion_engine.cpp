@@ -2391,7 +2391,8 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
                                               float frame_rate,
                                               const sd_cache_params_t* cache_params,
                                               bool preview_final_step,
-                                              const sd::Tensor<float>& video_positions) {
+                                              const sd::Tensor<float>& video_positions,
+                                              bool return_with_leftover_noise) {
     struct RunnerEndOnExit {
         GGMLRunner* runner = nullptr;
         ~RunnerEndOnExit() {
@@ -2980,7 +2981,10 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
 
     auto x0 = std::move(x0_opt);
     sd_sample::log_sample_cache_summary(cache_runtime, steps);
-    if (inverse_noise_scaling) {
+    // Leftover noise is the sampling-space latent at the last sigma. inverse
+    // scaling is for a finished (terminal-sigma) latent the VAE can decode;
+    // applying it here would make a later step window start from the wrong x.
+    if (inverse_noise_scaling && !return_with_leftover_noise) {
         x0 = denoiser->inverse_noise_scaling(sigmas[sigmas.size() - 1], x0);
     }
     x0 = denoiser->process_latent_out(std::move(x0));

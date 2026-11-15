@@ -585,6 +585,11 @@ void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params) {
     sd_img_gen_params->circular_y          = false;
     sd_img_gen_params->pm_params           = {nullptr, 0, nullptr, 20.f};
     sd_img_gen_params->pulid_params        = {nullptr, 1.0f};
+    sd_img_gen_params->start_at_step       = 0;
+    sd_img_gen_params->end_at_step         = -1;
+    sd_img_gen_params->add_noise           = true;
+    sd_img_gen_params->latent_in_path      = nullptr;
+    sd_img_gen_params->latent_out_path     = nullptr;
     sd_img_gen_params->vae_tiling_params   = {false, false, 0, 0, 0.5f, 0.0f, 0.0f, nullptr};
     sd_cache_params_init(&sd_img_gen_params->cache);
     sd_hires_params_init(&sd_img_gen_params->hires);
