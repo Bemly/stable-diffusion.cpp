@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <string>
 
 #include "core/rng.hpp"
 #include "diffusion_engine.h"
@@ -921,6 +922,24 @@ namespace sd::pipeline {
         return {};
     }
 
+    static std::string indexed_output_path(const char* path, int index, int batch_count) {
+        std::string pattern = path ? path : "";
+        if (pattern.find('%') != std::string::npos) {
+            char buffer[4096];
+            if (std::snprintf(buffer, sizeof(buffer), pattern.c_str(), index) > 0) {
+                return buffer;
+            }
+        }
+        if (batch_count <= 1) {
+            return pattern;
+        }
+        const auto dot = pattern.find_last_of('.');
+        if (dot == std::string::npos) {
+            return pattern + "_" + std::to_string(index);
+        }
+        return pattern.substr(0, dot) + "_" + std::to_string(index) + pattern.substr(dot);
+    }
+
     static bool write_latent_file(const char* path, const sd::Tensor<float>& latent) {
         FILE* file = std::fopen(path, "wb");
         if (file == nullptr) {
@@ -1058,8 +1077,8 @@ namespace sd::pipeline {
             LOG_ERROR("step window / latent handoff cannot be combined with an init image");
             return false;
         }
-        if ((has_latent_in || has_latent_out) && request.batch_count != 1) {
-            LOG_ERROR("latent handoff requires batch_count 1");
+        if (has_latent_in && request.batch_count != 1) {
+            LOG_ERROR("latent-in requires batch_count 1");
             return false;
         }
         if (!sd_img_gen_params->add_noise && !has_latent_in) {
@@ -1175,16 +1194,18 @@ namespace sd::pipeline {
             if (!x_0.empty()) {
                 LOG_INFO("sampling completed, taking %.2fs", (sampling_end - sampling_start) * 1.0f / 1000);
                 // Continuable sketch: leftover noisy latent. Preview PNG: denoised estimate in x_0.
+                // Batch drafts share one TE encode; each seed gets its own latent file.
                 if (has_latent_out) {
                     if (leftover_latent.empty()) {
                         LOG_ERROR("latent handoff requested but leftover latent is empty");
                         return false;
                     }
-                    if (!write_latent_file(latent_out, leftover_latent)) {
-                        LOG_ERROR("failed to write latent '%s'", latent_out);
+                    const std::string out_path = indexed_output_path(latent_out, b, request.batch_count);
+                    if (!write_latent_file(out_path.c_str(), leftover_latent)) {
+                        LOG_ERROR("failed to write latent '%s'", out_path.c_str());
                         return false;
                     }
-                    LOG_INFO("wrote latent to '%s'", latent_out);
+                    LOG_INFO("wrote latent to '%s'", out_path.c_str());
                 }
                 final_latents.push_back(std::move(x_0));
                 continue;

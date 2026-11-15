@@ -2770,8 +2770,9 @@ bool SDGenerationParams::validate(SDMode mode) {
             LOG_ERROR("error: step window and latent handoff require img_gen mode");
             return false;
         }
-        if (handoff && batch_count != 1) {
-            LOG_ERROR("error: latent handoff requires --batch-count 1");
+        // latent-out may batch (one TE encode, many seeds). latent-in / add-noise off stay single.
+        if ((!latent_in_path.empty() || noise == "off") && batch_count != 1) {
+            LOG_ERROR("error: --latent-in and --add-noise off require --batch-count 1");
             return false;
         }
         if (noise == "off" && latent_in_path.empty()) {
