@@ -82,6 +82,18 @@ public:
         entries_.clear();
     }
 
+    bool contains(const ConditionerParams& params) const {
+        if (capacity_ == 0) {
+            return false;
+        }
+        for (const auto& entry : entries_) {
+            if (same_params(entry.params, params)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     SDCondition get(Conditioner& conditioner, int n_threads, const ConditionerParams& params) {
         if (capacity_ == 0) {
             return conditioner.get_learned_condition(n_threads, params);

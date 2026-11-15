@@ -194,6 +194,8 @@ void StableDiffusionGGML::release_conditioner_weights() {
     // Embeddings already live in SDCondition tensors; sampling does not need the TE weights.
     const size_t before = model_manager->registered_params_size({ModelComponent::Conditioner});
     model_manager->unload_component(ModelComponent::Conditioner);
+    // Cache entries are embeddings, not weights. A later miss reloads the encoder.
+    conditioner_weights_released_ = true;
     LOG_INFO("released text-encoder params after conditioning (%.2f MB registered before unload)",
              before / (1024.f * 1024.f));
 }
@@ -1932,6 +1934,21 @@ bool StableDiffusionGGML::apply_loras(const sd_lora_t* loras, uint32_t lora_coun
 }
 
 SDCondition StableDiffusionGGML::get_learned_condition(const ConditionerParams& params) {
+    if (cond_stage_model == nullptr) {
+        LOG_ERROR("text encoder is not available");
+        return {};
+    }
+    // A hit returns the stored embeddings and must not touch encoder weights.
+    if (conditioning_cache_->contains(params)) {
+        return conditioning_cache_->get(*cond_stage_model, n_threads, params);
+    }
+    if (conditioner_weights_released_) {
+        // prepare_params reloads whatever release_conditioner_weights dropped.
+        LOG_INFO("conditioning cache miss; reloading text encoder");
+        conditioner_weights_released_ = false;
+    } else {
+        LOG_INFO("conditioning cache miss");
+    }
     return conditioning_cache_->get(*cond_stage_model, n_threads, params);
 }
 

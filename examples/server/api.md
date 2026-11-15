@@ -1229,6 +1229,12 @@ Example:
   "scm_mask": "",
   "scm_policy_dynamic": true,
 
+  "start_at_step": 0,
+  "end_at_step": -1,
+  "add_noise": "on",
+  "latent_in": "",
+  "latent_out": "",
+
   "preview": "none",
   "preview_interval": 1,
 
@@ -1236,6 +1242,8 @@ Example:
   "output_compression": 100
 }
 ```
+
+`start_at_step`, `end_at_step`, `add_noise` (`on` or `off`, or a boolean), `latent_in` and `latent_out` continue a sampling window. Paths are files on the server machine. `latent_out` may be indexed when `batch_count` is greater than 1. `latent_in` and `add_noise: off` require `batch_count` 1. Omitting them is a normal full sample. The step window is not part of the conditioning cache key, so repeating a prompt with a new window reuses cached text embeddings.
 
 ### LoRA Rules
 

@@ -103,7 +103,8 @@ public:
     bool disable_prefetch          = false;
     bool disable_segmented_compute = false;
     bool eager_load                = false;
-    bool release_te_after_encode   = false;
+    bool release_te_after_encode       = false;
+    bool conditioner_weights_released_ = false;
     std::string backend_spec;
     std::string params_backend_spec;
     std::string split_mode_spec;

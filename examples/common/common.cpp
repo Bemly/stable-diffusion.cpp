@@ -650,6 +650,10 @@ ArgOptions SDContextParams::get_options() {
          "--release-te-after-encode",
          "unload text-encoder/conditioner params after prompt conditioning so diffusion sampling can reuse that VRAM (Bemly)",
          true, &release_te_after_encode},
+        {"",
+         "--keep-te",
+         "keep text-encoder weights resident after conditioning (sd-server releases them unless this is set)",
+         false, &release_te_after_encode},
     };
 
     auto on_type_arg = [&](int argc, const char** argv, int index) {
@@ -2463,6 +2467,18 @@ bool SDGenerationParams::from_json_str(
         !parse_video_array_json_field(j, "ref_videos", ref_videos)) {
         LOG_ERROR("invalid input image/audio/video array");
         return false;
+    }
+
+    load_if_exists("start_at_step", start_at_step);
+    load_if_exists("end_at_step", end_at_step);
+    load_if_exists("latent_in", latent_in_path);
+    load_if_exists("latent_out", latent_out_path);
+    if (j.contains("add_noise")) {
+        if (j["add_noise"].is_boolean()) {
+            add_noise = j["add_noise"].get<bool>() ? "on" : "off";
+        } else if (j["add_noise"].is_string()) {
+            add_noise = j["add_noise"].get<std::string>();
+        }
     }
 
     return true;

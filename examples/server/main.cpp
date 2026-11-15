@@ -82,6 +82,10 @@ int main(int argc, const char** argv) {
     SDContextParams ctx_params;
     // Preserve the CLI default while disabling cwd scans for sd-server.
     ctx_params.lora_model_dir.clear();
+    // Warm server: keep prompt embeddings, drop TE weights after a miss encodes them.
+    // --conditioning-cache-size overrides the size; --keep-te keeps the weights resident.
+    ctx_params.conditioning_cache_size = 16;
+    ctx_params.release_te_after_encode = true;
     SDGenerationParams default_gen_params;
 
     sd_set_log_callback(sd_log_cb, (void*)&svr_params);
