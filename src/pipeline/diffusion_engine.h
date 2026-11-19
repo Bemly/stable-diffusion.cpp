@@ -209,6 +209,7 @@ public:
     std::string conditioning_cache_directory_;
     std::string conditioning_cache_model_scope_;
     std::string conditioning_cache_lora_scope_;
+    bool conditioning_cache_scope_initialized_ = false;
     std::vector<ModelManager::LoraSpec> conditioning_loras_;
     bool executing_ = false;
     sd::GenerationProgress generation_progress;

@@ -161,10 +161,11 @@ StableDiffusionGGML::~StableDiffusionGGML() = default;
 void StableDiffusionGGML::configure_conditioning_cache_for_loras(
     const std::vector<ModelManager::LoraSpec>& loras) {
     const std::string lora_scope = conditioning_lora_cache_scope(loras);
-    if (lora_scope == conditioning_cache_lora_scope_) {
+    if (conditioning_cache_scope_initialized_ && lora_scope == conditioning_cache_lora_scope_) {
         return;
     }
     conditioning_cache_lora_scope_ = lora_scope;
+    conditioning_cache_scope_initialized_ = true;
     conditioning_cache_->configure_persistence(
         conditioning_cache_directory_, conditioning_cache_model_scope_ + ";lora=" + lora_scope);
 }
@@ -268,8 +269,9 @@ void StableDiffusionGGML::release_conditioner_weights() {
 }
 
 bool StableDiffusionGGML::reset_runners(const RunnerGroups& groups) {
-    conditioning_cache_->clear();
+    conditioning_cache_->clear_memory();
     conditioning_cache_lora_scope_.clear();
+    conditioning_cache_scope_initialized_ = false;
     conditioning_loras_.clear();
     end_runners();
     clear_lora_adapters();
@@ -1033,6 +1035,7 @@ bool StableDiffusionGGML::init(const sd_ctx_params_t* sd_ctx_params) {
     conditioning_cache_directory_ = SAFE_STR(sd_ctx_params->conditioning_cache_dir);
     conditioning_cache_model_scope_ = conditioning_cache_scope(*sd_ctx_params);
     conditioning_cache_lora_scope_.clear();
+    conditioning_cache_scope_initialized_ = false;
     configure_conditioning_cache_for_loras({});
     auto configuration = std::make_unique<ModelConfig>(*sd_ctx_params);
     n_threads          = sd_ctx_params->n_threads;

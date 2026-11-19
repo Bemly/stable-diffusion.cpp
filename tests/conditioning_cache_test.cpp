@@ -1,4 +1,5 @@
 #include "conditioning/conditioning_cache.h"
+#include "pipeline/diffusion_engine.h"
 
 #include <chrono>
 #include <filesystem>
@@ -108,6 +109,23 @@ int main() {
             isolated.set_capacity(2);
             isolated.configure_persistence(temp.path.string(), "different model scope");
             require(isolated.size() == 0, "different model scope must not reuse entries");
+        }
+
+        {
+            StableDiffusionGGML engine;
+            engine.conditioning_cache_directory_ = temp.path.string();
+            engine.conditioning_cache_model_scope_ = "runner reset model scope";
+            engine.conditioning_cache_->set_capacity(2);
+            engine.configure_conditioning_cache_for_loras({});
+            engine.conditioning_cache_->get(conditioner, 1, params);
+            const int calls_before_reset = conditioner.calls;
+            require(engine.reset_runners({}), "empty runner reset should succeed");
+            engine.configure_conditioning_cache_for_loras({});
+            require(engine.conditioning_cache_->contains(params),
+                    "runner reset must preserve persisted conditioning");
+            engine.conditioning_cache_->get(conditioner, 1, params);
+            require(conditioner.calls == calls_before_reset,
+                    "runner reset should restore conditioning without encoding");
         }
 
         {
