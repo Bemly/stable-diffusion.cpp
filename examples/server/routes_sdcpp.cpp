@@ -508,7 +508,18 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
     });
 
     routes.get("/sdcpp/v1/conditioning-cache", [runtime](const httplib::Request&, httplib::Response& res) {
-        std::lock_guard<std::mutex> lock(*runtime->sd_ctx_mutex);
+        std::unique_lock<std::mutex> lock(*runtime->sd_ctx_mutex, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            std::lock_guard<std::mutex> snapshot_lock(runtime->conditioning_snapshot_mutex);
+            if (runtime->conditioning_snapshot.empty()) {
+                res.status = 503;
+                res.set_content(R"({"error":"Conditioning cache snapshot unavailable","code":"cache_snapshot_unavailable"})", "application/json");
+            } else {
+                res.status = 200;
+                res.set_content(runtime->conditioning_snapshot, "application/json");
+            }
+            return;
+        }
         if (runtime->sd_ctx == nullptr) {
             res.status = 200;
             res.set_content(R"({"capacity":0,"size":0,"entries":[],"model_loaded":false})", "application/json");
@@ -516,8 +527,8 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
         }
         char* json = sd_conditioning_cache_to_json(runtime->sd_ctx);
         if (json == nullptr) {
-            res.status = 200;
-            res.set_content(R"({"capacity":0,"size":0,"entries":[],"model_loaded":true})", "application/json");
+            res.status = 500;
+            res.set_content(R"({"error":"Failed to read conditioning cache"})", "application/json");
             return;
         }
         // Annotate for the app without re-parsing the whole object.
@@ -541,11 +552,15 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
         const std::string id = req.has_param("id") ? req.get_param_value("id") : "";
         if (id.empty()) {
             sd_conditioning_cache_clear(runtime->sd_ctx);
+            runtime->update_conditioning_snapshot(runtime->sd_ctx);
             res.status = 200;
             res.set_content(R"({"ok":true,"cleared":"all"})", "application/json");
             return;
         }
         const bool erased = sd_conditioning_cache_erase(runtime->sd_ctx, id.c_str());
+        if (erased) {
+            runtime->update_conditioning_snapshot(runtime->sd_ctx);
+        }
         res.status        = erased ? 200 : 404;
         res.set_content(json({{"ok", erased}, {"id", id}}).dump(), "application/json");
     });
@@ -579,6 +594,9 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
             return;
         }
         const int removed = sd_conditioning_cache_purge_older_than(runtime->sd_ctx, max_age);
+        if (removed >= 0) {
+            runtime->update_conditioning_snapshot(runtime->sd_ctx);
+        }
         res.status        = 200;
         res.set_content(json({{"ok", true}, {"removed", removed}, {"max_age_seconds", max_age}}).dump(),
                         "application/json");

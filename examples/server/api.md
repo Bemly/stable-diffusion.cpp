@@ -67,6 +67,11 @@ Current endpoints include:
 - `POST /sdcpp/v1/vid_gen`
 - `POST /sdcpp/v1/upscale`
 
+While an async generation holds the model context, the cache GET returns the
+latest generation-thread snapshot with `"snapshot": true`, or HTTP 503 with
+`"code": "cache_snapshot_unavailable"` until a snapshot is available. Cache
+mutations still wait for the model context.
+
 ## Model management
 
 Model management is additive: existing generation request bodies, successful

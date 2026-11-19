@@ -117,18 +117,27 @@ static void finish_job_progress(AsyncGenerationJob& job) {
 class JobCallbacksGuard {
     sd_ctx_t* ctx_;
     AsyncGenerationJob& job_;
+    ServerRuntime& runtime_;
     bool detailing_ = false;
+    std::string cache_stage_;
+    std::string cache_detail_;
 
     static void progress_callback(const sd_generation_progress_t* progress, void* data) {
         auto& guard = *static_cast<JobCallbacksGuard*>(data);
+        if (guard.cache_stage_ != progress->stage || guard.cache_detail_ != progress->detail) {
+            guard.cache_stage_ = progress->stage;
+            guard.cache_detail_ = progress->detail;
+            guard.runtime_.update_conditioning_snapshot(guard.ctx_);
+        }
         update_job_progress(guard.job_, guard.detailing_ ? "adetailer" : progress->stage,
                             guard.detailing_ ? progress->stage : progress->detail,
                             progress->sample_pass, progress->completed, progress->total, progress->unit);
     }
 
 public:
-    JobCallbacksGuard(sd_ctx_t* ctx, AsyncGenerationJob& job)
-        : ctx_(ctx), job_(job) {
+    JobCallbacksGuard(sd_ctx_t* ctx, AsyncGenerationJob& job, ServerRuntime& runtime)
+        : ctx_(ctx), job_(job), runtime_(runtime) {
+        runtime_.update_conditioning_snapshot(ctx_);
         clear_preview_callback();
         set_preview_callback(job);
         sd_set_generation_progress_callback(ctx_, progress_callback, this);
@@ -354,7 +363,7 @@ bool execute_img_gen_job(ServerRuntime& runtime,
             return false;
         }
         JobCancellationMonitor cancellation(runtime.sd_ctx, job);
-        JobCallbacksGuard callbacks(runtime.sd_ctx, job);
+        JobCallbacksGuard callbacks(runtime.sd_ctx, job, runtime);
         sd_image_generation_result_t* generated = nullptr;
         generate_image(runtime.sd_ctx, &params, &generated);
         results.adopt(generated, runtime.ctx_params->lora_model_dir);
@@ -436,7 +445,7 @@ bool execute_vid_gen_job(ServerRuntime& runtime,
             return false;
         }
         JobCancellationMonitor cancellation(runtime.sd_ctx, job);
-        JobCallbacksGuard callbacks(runtime.sd_ctx, job);
+        JobCallbacksGuard callbacks(runtime.sd_ctx, job, runtime);
         sd_video_generation_result_t* generated = nullptr;
         if (generate_video(runtime.sd_ctx, &params, &generated)) {
             output_fps       = generated->fps;

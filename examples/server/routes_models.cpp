@@ -109,6 +109,10 @@ static void change_model(ServerRuntime& runtime, const httplib::Request& req, ht
     const json recipe    = unload ? json(nullptr) : body.at("recipe");
     const json selection = unload ? json::object() : body.value("models", json::object());
     set_model_status(runtime, "loading", recipe, selection);
+    {
+        std::lock_guard<std::mutex> snapshot_lock(runtime.conditioning_snapshot_mutex);
+        runtime.conditioning_snapshot.clear();
+    }
     try {
         runtime.sd_ctx = nullptr;
         models.context.reset();

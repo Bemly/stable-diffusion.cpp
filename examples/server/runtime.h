@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <json.hpp>
@@ -67,6 +69,25 @@ struct ServerRuntime {
     std::mutex* upscaler_mutex;
     AsyncJobManager* async_job_manager;
     ServerModels* models;
+    std::mutex conditioning_snapshot_mutex;
+    std::string conditioning_snapshot;
+
+    void update_conditioning_snapshot(sd_ctx_t* ctx) {
+        char* value = sd_conditioning_cache_to_json(ctx);
+        if (value == nullptr) {
+            std::lock_guard<std::mutex> lock(conditioning_snapshot_mutex);
+            conditioning_snapshot.clear();
+            return;
+        }
+        std::string snapshot(value);
+        free(value);
+        if (!snapshot.empty() && snapshot.back() == '}') {
+            snapshot.pop_back();
+            snapshot += ",\"model_loaded\":true,\"snapshot\":true}";
+        }
+        std::lock_guard<std::mutex> lock(conditioning_snapshot_mutex);
+        conditioning_snapshot = std::move(snapshot);
+    }
 };
 
 struct ServerADetailerPass {
