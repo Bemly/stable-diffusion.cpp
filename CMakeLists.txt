@@ -430,6 +430,14 @@ if (SD_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+option(SD_BUILD_CONDITIONING_CACHE_TESTS "Build conditioning-cache persistence tests" OFF)
+if (SD_BUILD_CONDITIONING_CACHE_TESTS)
+    enable_testing()
+    add_executable(sd-conditioning-cache-tests tests/conditioning_cache_test.cpp)
+    target_include_directories(sd-conditioning-cache-tests PRIVATE src src/core)
+    target_link_libraries(sd-conditioning-cache-tests PRIVATE stable-diffusion)
+    add_test(NAME sd-conditioning-cache-tests COMMAND sd-conditioning-cache-tests)
+endif()
 
 
 #

@@ -4,6 +4,8 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <iomanip>
 #include <list>
 #include <mutex>
 #include <set>
@@ -94,6 +96,47 @@ struct has_set_runtime_backends<T,
 
 static_assert(std::atomic<sd_cancel_mode_t>::is_always_lock_free,
               "sd_cancel_mode_t must be lock-free");
+
+static void append_conditioning_cache_file_scope(std::ostringstream& scope, const char* raw_path) {
+    const std::string path = SAFE_STR(raw_path);
+    scope << path.size() << ':' << path << ';';
+    if (path.empty()) {
+        return;
+    }
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        scope << "missing;";
+        return;
+    }
+    const auto modified = std::filesystem::last_write_time(path, ec);
+    if (ec) {
+        scope << size << ":unknown;";
+        return;
+    }
+    scope << size << ':' << static_cast<int64_t>(modified.time_since_epoch().count()) << ';';
+}
+
+static std::string conditioning_cache_scope(const sd_ctx_params_t& params) {
+    std::ostringstream scope;
+    scope << sd_commit() << ';' << sd_type_name(params.wtype) << ';'
+          << SAFE_STR(params.tensor_type_rules) << ';' << SAFE_STR(params.model_args) << ';'
+          << std::setprecision(9) << params.linear_scale << ';' << params.attn_scale << ';';
+    for (const char* path : {
+             params.model_path, params.clip_l_path, params.clip_g_path, params.clip_vision_path,
+             params.t5xxl_path, params.llm_path, params.llm_vision_path, params.tokenizer,
+             params.diffusion_model_path, params.high_noise_diffusion_model_path,
+             params.uncond_diffusion_model_path, params.embeddings_connectors_path,
+             params.audio_encoder_path,
+         }) {
+        append_conditioning_cache_file_scope(scope, path);
+    }
+    for (uint32_t i = 0; params.embeddings != nullptr && i < params.embedding_count; ++i) {
+        scope << SAFE_STR(params.embeddings[i].name) << ';';
+        append_conditioning_cache_file_scope(scope, params.embeddings[i].path);
+    }
+    return scope.str();
+}
 
 StableDiffusionGGML::StableDiffusionGGML()
     : rng(std::make_shared<PhiloxRNG>()),
@@ -960,6 +1003,8 @@ bool StableDiffusionGGML::init(const sd_ctx_params_t* sd_ctx_params) {
     conv2d_direct_by_backend.clear();
     conv3d_direct_by_backend.clear();
     conditioning_cache_->set_capacity(static_cast<size_t>(sd_ctx_params->conditioning_cache_size));
+    conditioning_cache_->configure_persistence(
+        SAFE_STR(sd_ctx_params->conditioning_cache_dir), conditioning_cache_scope(*sd_ctx_params));
     auto configuration = std::make_unique<ModelConfig>(*sd_ctx_params);
     n_threads          = sd_ctx_params->n_threads;
     tensor_executor    = std::make_unique<sd::ParallelExecutor>(n_threads > 0 ? n_threads : sd_get_num_physical_cores());

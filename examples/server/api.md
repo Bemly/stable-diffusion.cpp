@@ -49,6 +49,9 @@ Current generation-related endpoints include:
 ### sdcpp API
 
 Native async API for `stable-diffusion.cpp`.
+For disk-backed text conditioning across server restarts, launch the server with
+`--conditioning-cache-dir <directory>`. Entries are scoped to the loaded model
+and encoder files; reference-image conditioning is kept in memory only.
 
 Current endpoints include:
 

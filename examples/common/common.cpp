@@ -434,6 +434,11 @@ ArgOptions SDContextParams::get_options() {
          (int)',',
          &tokenizer},
         {"",
+         "--conditioning-cache-dir",
+         "directory for persisted text-conditioning cache entries (disabled when omitted)",
+         0,
+         &conditioning_cache_dir},
+        {"",
          "--llm_vision",
          "path to the llm vit",
          0,
@@ -595,7 +600,6 @@ ArgOptions SDContextParams::get_options() {
          "maximum number of conditioning results cached per model context (default: " + std::to_string(conditioning_cache_size) + ", 0 disables caching)",
          &conditioning_cache_size},
     };
-
     options.bool_options = {
         {"",
          "--list-devices",
@@ -1023,6 +1027,7 @@ std::string SDContextParams::to_string() const {
         << "  flash_attn_mode: " << flash_attn_mode << ",\n"
         << "  conv_direct_mode: " << (conv_direct_mode.empty() ? "auto (legacy flags honored)" : conv_direct_mode) << ",\n"
         << "  sage_attn: " << (sage_attn ? "true" : "false") << ",\n"
+        << "  conditioning_cache_dir: " << conditioning_cache_dir << ",\n"
         << "  linear_scale: " << linear_scale << ",\n"
         << "  attn_scale: " << attn_scale << ",\n"
         << "  diffusion_conv_direct: " << (diffusion_conv_direct ? "true" : "false") << ",\n"
@@ -1074,6 +1079,7 @@ sd_ctx_params_t SDContextParams::to_sd_ctx_params_t() {
     sd_ctx_params.tensor_type_rules               = tensor_type_rules.c_str();
     sd_ctx_params.n_threads                       = n_threads;
     sd_ctx_params.conditioning_cache_size         = conditioning_cache_size;
+    sd_ctx_params.conditioning_cache_dir          = conditioning_cache_dir.c_str();
     sd_ctx_params.wtype                           = wtype;
     sd_ctx_params.rng_type                        = rng_type;
     sd_ctx_params.sampler_rng_type                = sampler_rng_type;

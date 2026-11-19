@@ -4,10 +4,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <list>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "conditioning/conditioner.hpp"
@@ -30,10 +33,11 @@ class ConditioningCache {
         SDCondition condition;
         std::chrono::system_clock::time_point created_at;
         std::string id;
+        bool persisted = false;
 
-        Entry(const ConditionerParams& input, const SDCondition& output, std::string entry_id)
-            : params(input), condition(output),
-              created_at(std::chrono::system_clock::now()),
+        Entry(const ConditionerParams& input, const SDCondition& output, std::string entry_id,
+              std::chrono::system_clock::time_point created = std::chrono::system_clock::now())
+            : params(input), condition(output), created_at(created),
               id(std::move(entry_id)) {
             // Request-owned reference pointers must not outlive the request.
             if (input.ref_images != nullptr) {
@@ -52,6 +56,15 @@ class ConditioningCache {
 
     size_t capacity_ = 4;
     std::list<Entry> entries_;
+    std::filesystem::path storage_dir_;
+    std::string storage_scope_;
+
+    struct PersistedEntry {
+        ConditionerParams params;
+        SDCondition condition;
+        std::chrono::system_clock::time_point created_at;
+        std::string id;
+    };
 
     static bool same_images(const std::vector<sd::Tensor<float>>& a,
                             const std::vector<sd::Tensor<float>>& b) {
@@ -68,7 +81,8 @@ class ConditioningCache {
                             r.pass_to_vlm, r.pass_to_dit, r.ref_index_mode,
                             r.force_ref_timestep_zero, r.resize_before_vae, r.vae_input_max_pixels,
                             r.vlm_resize_mode, r.vlm_min_size, r.vlm_max_size, r.resize_vae_to_target,
-                            r.ref_image_size);
+                            r.resize_single_ref_to_target, r.vae_size_buckets, r.vae_center_crop,
+                            r.vlm_use_vae_input, r.ref_image_size);
         };
         if (fields(a) != fields(b) ||
             (a.ref_images == nullptr) != (b.ref_images == nullptr) ||
@@ -89,41 +103,60 @@ class ConditioningCache {
         return true;
     }
 
-    static std::string make_id(const ConditionerParams& params) {
-        // Stable enough for UI delete; collisions across ref-image variants are rare here.
-        std::ostringstream oss;
-        oss << std::hex;
-        size_t h = std::hash<std::string>{}(params.text);
-        h ^= (static_cast<size_t>(params.width) << 1);
-        h ^= (static_cast<size_t>(params.height) << 3);
-        h ^= (static_cast<size_t>(params.clip_skip) << 5);
-        h ^= params.zero_out_masked ? 0x9e3779b97f4a7c15ULL : 0;
-        oss << h;
-        return oss.str();
-    }
+    static std::string make_id(const ConditionerParams& params);
 
     static int64_t unix_seconds(std::chrono::system_clock::time_point tp) {
         return std::chrono::duration_cast<std::chrono::seconds>(tp.time_since_epoch()).count();
     }
 
+    std::filesystem::path file_for_id(const std::string& id) const;
+    bool read_entry(const std::filesystem::path& path, PersistedEntry& out) const;
+    bool load_for_params(const ConditionerParams& params);
+    void load_existing();
+    void persist(Entry& entry);
+    void remove_persisted(const Entry& entry);
+    void touch_persisted(const Entry& entry);
+
 public:
     void set_capacity(size_t capacity) {
         capacity_ = capacity;
         while (entries_.size() > capacity_) {
+            remove_persisted(entries_.back());
             entries_.pop_back();
         }
     }
 
+    void configure_persistence(const std::string& directory, const std::string& scope);
     size_t capacity() const { return capacity_; }
     size_t size() const { return entries_.size(); }
 
     void clear() {
+        for (const auto& entry : entries_) {
+            remove_persisted(entry);
+        }
+        entries_.clear();
+        std::error_code ec;
+        if (!storage_dir_.empty()) {
+            for (const auto& item : std::filesystem::directory_iterator(storage_dir_, ec)) {
+                if (ec) {
+                    break;
+                }
+                if (item.path().extension() == ".cndcache" || item.path().extension() == ".tmp") {
+                    std::filesystem::remove(item.path(), ec);
+                    ec.clear();
+                }
+            }
+        }
+    }
+
+    void clear_memory() {
         entries_.clear();
     }
 
     bool erase_id(const std::string& id) {
         for (auto it = entries_.begin(); it != entries_.end(); ++it) {
             if (it->id == id) {
+                remove_persisted(*it);
                 entries_.erase(it);
                 return true;
             }
@@ -131,22 +164,7 @@ public:
         return false;
     }
 
-    size_t purge_older_than(std::chrono::seconds max_age) {
-        if (max_age.count() < 0) {
-            return 0;
-        }
-        const auto cutoff = std::chrono::system_clock::now() - max_age;
-        size_t removed    = 0;
-        for (auto it = entries_.begin(); it != entries_.end();) {
-            if (it->created_at < cutoff) {
-                it = entries_.erase(it);
-                ++removed;
-            } else {
-                ++it;
-            }
-        }
-        return removed;
-    }
+    size_t purge_older_than(std::chrono::seconds max_age);
 
     std::vector<ConditioningCacheEntryInfo> list() const {
         std::vector<ConditioningCacheEntryInfo> out;
@@ -166,7 +184,7 @@ public:
         return out;
     }
 
-    bool contains(const ConditionerParams& params) const {
+    bool contains(const ConditionerParams& params) {
         if (capacity_ == 0) {
             return false;
         }
@@ -175,7 +193,7 @@ public:
                 return true;
             }
         }
-        return false;
+        return load_for_params(params);
     }
 
     SDCondition get(Conditioner& conditioner, int n_threads, const ConditionerParams& params) {
@@ -185,16 +203,23 @@ public:
         for (auto it = entries_.begin(); it != entries_.end(); ++it) {
             if (same_params(it->params, params)) {
                 entries_.splice(entries_.begin(), entries_, it);
+                touch_persisted(entries_.front());
                 LOG_INFO("conditioning cache hit");
                 return entries_.front().condition;
             }
         }
+        if (load_for_params(params)) {
+            LOG_INFO("conditioning cache hit (disk)");
+            return entries_.front().condition;
+        }
         auto condition = conditioner.get_learned_condition(n_threads, params);
         if (!condition.empty()) {
             if (entries_.size() == capacity_) {
+                remove_persisted(entries_.back());
                 entries_.pop_back();
             }
             entries_.emplace_front(params, condition, make_id(params));
+            persist(entries_.front());
             LOG_VERBOSE("conditioning cache stored (%zu/%zu)", entries_.size(), capacity_);
         }
         return condition;
