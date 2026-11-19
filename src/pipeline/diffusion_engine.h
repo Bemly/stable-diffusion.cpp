@@ -206,6 +206,9 @@ public:
     std::unique_ptr<ModelConfig> config_;
     RunnerState runner_state_;
     std::unique_ptr<ConditioningCache> conditioning_cache_;
+    std::string conditioning_cache_directory_;
+    std::string conditioning_cache_model_scope_;
+    std::string conditioning_cache_lora_scope_;
     std::vector<ModelManager::LoraSpec> conditioning_loras_;
     bool executing_ = false;
     sd::GenerationProgress generation_progress;
@@ -223,6 +226,8 @@ public:
     ModelLoader::FileVersions runner_source_versions(RunnerGroup group, const ModelLoader& loader) const;
 
     void capture_runner_sources();
+
+    void configure_conditioning_cache_for_loras(const std::vector<ModelManager::LoraSpec>& loras);
 
     void end_runners();
 

@@ -62,6 +62,8 @@ int main() {
             require(conditioner.calls == 1, "cache miss should encode once");
             require(result.c_crossattn.values() == std::vector<float>({1.f, 2.f, 3.f, 4.f, 5.f, 6.f}),
                     "fresh conditioning mismatch");
+            cache.get(conditioner, 1, params);
+            require(conditioner.calls == 1, "same conditioning params should not encode twice");
         }
 
         std::filesystem::path cache_dir;
@@ -106,6 +108,34 @@ int main() {
             isolated.set_capacity(2);
             isolated.configure_persistence(temp.path.string(), "different model scope");
             require(isolated.size() == 0, "different model scope must not reuse entries");
+        }
+
+        {
+            const std::string lora_a_scope = "model scope;lora=variant-a";
+            const std::string lora_b_scope = "model scope;lora=variant-b";
+            {
+                ConditioningCache lora_a;
+                lora_a.set_capacity(2);
+                lora_a.configure_persistence(temp.path.string(), lora_a_scope);
+                lora_a.get(conditioner, 1, params);
+            }
+            const int calls_after_lora_a = conditioner.calls;
+            {
+                ConditioningCache lora_b;
+                lora_b.set_capacity(2);
+                lora_b.configure_persistence(temp.path.string(), lora_b_scope);
+                require(lora_b.size() == 0, "different LoRA scope must not reuse entries");
+            }
+            {
+                ConditioningCache restored_lora_a;
+                restored_lora_a.set_capacity(2);
+                restored_lora_a.configure_persistence(temp.path.string(), lora_a_scope);
+                require(restored_lora_a.contains(params),
+                        "same LoRA scope should restore its persisted entry");
+                restored_lora_a.get(conditioner, 1, params);
+                require(conditioner.calls == calls_after_lora_a,
+                        "restored LoRA conditioning should not rerun the encoder");
+            }
         }
 
         {

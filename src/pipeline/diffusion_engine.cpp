@@ -138,12 +138,36 @@ static std::string conditioning_cache_scope(const sd_ctx_params_t& params) {
     return scope.str();
 }
 
+static std::string conditioning_lora_cache_scope(const std::vector<ModelManager::LoraSpec>& loras) {
+    std::ostringstream scope;
+    scope << std::setprecision(9);
+    for (const auto& lora : loras) {
+        append_conditioning_cache_file_scope(scope, lora.path.c_str());
+        scope << lora.multiplier << ';'
+              << lora.is_high_noise << ';'
+              << lora.tensor_name_prefix_filter.size() << ':'
+              << lora.tensor_name_prefix_filter << ';';
+    }
+    return scope.str();
+}
+
 StableDiffusionGGML::StableDiffusionGGML()
     : rng(std::make_shared<PhiloxRNG>()),
       conditioning_cache_(std::make_unique<ConditioningCache>()),
       denoiser(std::make_shared<CompVisDenoiser>()) {}
 
 StableDiffusionGGML::~StableDiffusionGGML() = default;
+
+void StableDiffusionGGML::configure_conditioning_cache_for_loras(
+    const std::vector<ModelManager::LoraSpec>& loras) {
+    const std::string lora_scope = conditioning_lora_cache_scope(loras);
+    if (lora_scope == conditioning_cache_lora_scope_) {
+        return;
+    }
+    conditioning_cache_lora_scope_ = lora_scope;
+    conditioning_cache_->configure_persistence(
+        conditioning_cache_directory_, conditioning_cache_model_scope_ + ";lora=" + lora_scope);
+}
 
 const std::map<StableDiffusionGGML::RunnerGroup, std::set<ModelComponent>>& StableDiffusionGGML::runner_components() {
     static const std::map<RunnerGroup, std::set<ModelComponent>> components{
@@ -245,6 +269,7 @@ void StableDiffusionGGML::release_conditioner_weights() {
 
 bool StableDiffusionGGML::reset_runners(const RunnerGroups& groups) {
     conditioning_cache_->clear();
+    conditioning_cache_lora_scope_.clear();
     conditioning_loras_.clear();
     end_runners();
     clear_lora_adapters();
@@ -333,6 +358,8 @@ bool StableDiffusionGGML::apply_model_update(ModelLoader candidate,
     if (next_config) {
         config_ = std::move(next_config);
     }
+    conditioning_cache_model_scope_ = conditioning_cache_scope(config_->params);
+    configure_conditioning_cache_for_loras({});
     version = next_version;
     if (!build_runners(groups)) {
         reset_runners(all_runner_groups());
@@ -1003,8 +1030,10 @@ bool StableDiffusionGGML::init(const sd_ctx_params_t* sd_ctx_params) {
     conv2d_direct_by_backend.clear();
     conv3d_direct_by_backend.clear();
     conditioning_cache_->set_capacity(static_cast<size_t>(sd_ctx_params->conditioning_cache_size));
-    conditioning_cache_->configure_persistence(
-        SAFE_STR(sd_ctx_params->conditioning_cache_dir), conditioning_cache_scope(*sd_ctx_params));
+    conditioning_cache_directory_ = SAFE_STR(sd_ctx_params->conditioning_cache_dir);
+    conditioning_cache_model_scope_ = conditioning_cache_scope(*sd_ctx_params);
+    conditioning_cache_lora_scope_.clear();
+    configure_conditioning_cache_for_loras({});
     auto configuration = std::make_unique<ModelConfig>(*sd_ctx_params);
     n_threads          = sd_ctx_params->n_threads;
     tensor_executor    = std::make_unique<sd::ParallelExecutor>(n_threads > 0 ? n_threads : sd_get_num_physical_cores());
@@ -1943,17 +1972,8 @@ bool StableDiffusionGGML::apply_loras(const sd_lora_t* loras, uint32_t lora_coun
     end_runners();
     clear_lora_adapters();
     if (!model_manager->prepare_lora_sources(all_loras)) {
-        conditioning_cache_->clear();
+        conditioning_cache_->clear_memory();
         return false;
-    }
-    if (!std::equal(all_loras.begin(), all_loras.end(),
-                    conditioning_loras_.begin(), conditioning_loras_.end(),
-                    [](const ModelManager::LoraSpec& a, const ModelManager::LoraSpec& b) {
-                        return a.file_id == b.file_id && a.file_revision == b.file_revision &&
-                               a.multiplier == b.multiplier && a.is_high_noise == b.is_high_noise &&
-                               a.tensor_name_prefix_filter == b.tensor_name_prefix_filter;
-                    })) {
-        conditioning_cache_->clear();
     }
     runtime_lora_models.erase(std::remove_if(runtime_lora_models.begin(), runtime_lora_models.end(), [&](const RuntimeLora& entry) {
                                   return std::none_of(all_loras.begin(), all_loras.end(), [&](const ModelManager::LoraSpec& spec) {
@@ -1964,7 +1984,7 @@ bool StableDiffusionGGML::apply_loras(const sd_lora_t* loras, uint32_t lora_coun
     const bool success = apply_lora_immediately ? apply_loras_immediately(all_loras)
                                                 : apply_loras_at_runtime(all_loras);
     if (!success) {
-        conditioning_cache_->clear();
+        conditioning_cache_->clear_memory();
         clear_lora_adapters();
         runtime_lora_models.clear();
         return false;
@@ -1975,6 +1995,7 @@ bool StableDiffusionGGML::apply_loras(const sd_lora_t* loras, uint32_t lora_coun
         LOG_INFO("apply_loras completed, taking %.2fs", (t1 - t0) * 1.0f / 1000);
     }
     conditioning_loras_ = std::move(all_loras);
+    configure_conditioning_cache_for_loras(conditioning_loras_);
     return true;
 }
 
