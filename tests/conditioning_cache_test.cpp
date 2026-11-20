@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -20,11 +21,12 @@ void require(bool condition, const char* message) {
 class FakeConditioner final : public Conditioner {
 public:
     int calls = 0;
+    std::vector<float> output = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
 
     SDCondition get_learned_condition(int, const ConditionerParams&) override {
         ++calls;
         SDCondition condition;
-        condition.c_crossattn = sd::Tensor<float>({2, 3}, {1.f, 2.f, 3.f, 4.f, 5.f, 6.f});
+        condition.c_crossattn = sd::Tensor<float>({2, 3}, output);
         condition.c_input_ids = sd::Tensor<int32_t>({3}, {11, 12, 13});
         return condition;
     }
@@ -54,6 +56,51 @@ int main() {
         params.width = 768;
         params.height = 1024;
         FakeConditioner conditioner;
+
+        {
+            TemporaryDirectory invalid_temp;
+            FakeConditioner faulty;
+            faulty.output.assign(6, 0.f);
+            ConditionerParams invalid_params = params;
+            invalid_params.text = "invalid moss encoding";
+            {
+                ConditioningCache old_cache;
+                old_cache.configure_persistence(invalid_temp.path.string(), "moss validation");
+                old_cache.get(faulty, 1, invalid_params);
+                require(old_cache.size() == 1, "setup must persist legacy invalid entry");
+            }
+            ConditioningCache cache;
+            cache.configure_persistence(invalid_temp.path.string(), "moss validation");
+            cache.set_moss_validation(true);
+            require(!cache.contains(invalid_params), "invalid legacy encoding must not hit");
+            require(cache.get(faulty, 1, invalid_params).empty(), "all-zero encoding must fail");
+            require(cache.size() == 0, "invalid encoding must not be cached");
+            faulty.output = {1.f, 2.f, std::numeric_limits<float>::quiet_NaN(), 4.f, 5.f, 6.f};
+            require(cache.get(faulty, 1, invalid_params).empty(), "non-finite encoding must fail");
+            faulty.output = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+            require(!cache.get(faulty, 1, invalid_params).empty(), "valid encoding must succeed");
+            const int calls = faulty.calls;
+            cache.get(faulty, 1, invalid_params);
+            require(faulty.calls == calls, "valid encoding must be reused");
+            cache.set_capacity(0);
+            faulty.output.assign(6, 0.f);
+            require(cache.get(faulty, 1, invalid_params).empty(), "disabled cache must still validate");
+        }
+
+        {
+            StableDiffusionGGML engine;
+            auto faulty = std::make_shared<FakeConditioner>();
+            faulty->output.assign(6, 0.f);
+            engine.cond_stage_model = faulty;
+            engine.conditioning_cache_->set_moss_validation(true);
+            std::string detail;
+            engine.generation_progress.set_callback(
+                [](const sd_generation_progress_t* progress, void* data) {
+                    *static_cast<std::string*>(data) = progress->detail ? progress->detail : "";
+                }, &detail);
+            require(engine.get_learned_condition(params).empty(), "engine must reject invalid encoding");
+            require(detail == "INVALID_MOSS_TEXT_ENCODING", "engine must report invalid encoding");
+        }
 
         {
             ConditioningCache cache;

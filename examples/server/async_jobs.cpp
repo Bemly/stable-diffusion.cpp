@@ -381,7 +381,10 @@ bool execute_img_gen_job(ServerRuntime& runtime,
 
     const int num_results = results.count();
     if (job.cancel_requested.load() || num_results <= 0) {
-        error_message = "generate_image returned no results";
+        std::lock_guard<std::mutex> lock(job.progress_mutex);
+        error_message = job.progress.stage == "error" && job.progress.detail == "INVALID_MOSS_TEXT_ENCODING"
+                            ? job.progress.detail
+                            : "generate_image returned no results";
         return false;
     }
 

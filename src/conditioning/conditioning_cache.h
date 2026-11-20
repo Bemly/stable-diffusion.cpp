@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <list>
@@ -21,6 +22,7 @@ struct ConditioningCacheEntryInfo {
     int width     = -1;
     int height    = -1;
     int clip_skip = -1;
+    bool zero_out_masked = false;
     int64_t created_at_unix = 0;
     int64_t age_seconds     = 0;
 };
@@ -58,6 +60,16 @@ class ConditioningCache {
     std::list<Entry> entries_;
     std::filesystem::path storage_dir_;
     std::string storage_scope_;
+    bool validate_moss_ = false;
+    bool invalid_moss_encoding_ = false;
+
+    bool valid_condition(const SDCondition& condition) const {
+        if (!validate_moss_) return true;
+        const auto& values = condition.c_crossattn.values();
+        return !values.empty() &&
+               std::all_of(values.begin(), values.end(), [](float v) { return std::isfinite(v); }) &&
+               std::any_of(values.begin(), values.end(), [](float v) { return v != 0.f; });
+    }
 
     struct PersistedEntry {
         ConditionerParams params;
@@ -118,6 +130,20 @@ class ConditioningCache {
     void touch_persisted(const Entry& entry);
 
 public:
+    void set_moss_validation(bool enabled) {
+        validate_moss_ = enabled;
+        if (enabled) {
+            for (auto it = entries_.begin(); it != entries_.end();) {
+                if (!valid_condition(it->condition)) {
+                    LOG_WARN("conditioning cache: ignoring invalid MOSS text encoding '%s'", it->id.c_str());
+                    it = entries_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+
     void set_capacity(size_t capacity) {
         capacity_ = capacity;
         while (entries_.size() > capacity_) {
@@ -129,6 +155,7 @@ public:
     void configure_persistence(const std::string& directory, const std::string& scope);
     size_t capacity() const { return capacity_; }
     size_t size() const { return entries_.size(); }
+    bool invalid_moss_encoding() const { return invalid_moss_encoding_; }
 
     void clear() {
         for (const auto& entry : entries_) {
@@ -177,6 +204,7 @@ public:
             info.width            = entry.params.width;
             info.height           = entry.params.height;
             info.clip_skip        = entry.params.clip_skip;
+            info.zero_out_masked  = entry.params.zero_out_masked;
             info.created_at_unix  = unix_seconds(entry.created_at);
             info.age_seconds      = std::chrono::duration_cast<std::chrono::seconds>(now - entry.created_at).count();
             out.push_back(std::move(info));
@@ -197,23 +225,28 @@ public:
     }
 
     SDCondition get(Conditioner& conditioner, int n_threads, const ConditionerParams& params) {
-        if (capacity_ == 0) {
-            return conditioner.get_learned_condition(n_threads, params);
-        }
-        for (auto it = entries_.begin(); it != entries_.end(); ++it) {
-            if (same_params(it->params, params)) {
-                entries_.splice(entries_.begin(), entries_, it);
-                touch_persisted(entries_.front());
-                LOG_INFO("conditioning cache hit");
+        invalid_moss_encoding_ = false;
+        if (capacity_ != 0) {
+            for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+                if (same_params(it->params, params)) {
+                    entries_.splice(entries_.begin(), entries_, it);
+                    touch_persisted(entries_.front());
+                    LOG_INFO("conditioning cache hit");
+                    return entries_.front().condition;
+                }
+            }
+            if (load_for_params(params)) {
+                LOG_INFO("conditioning cache hit (disk)");
                 return entries_.front().condition;
             }
         }
-        if (load_for_params(params)) {
-            LOG_INFO("conditioning cache hit (disk)");
-            return entries_.front().condition;
-        }
         auto condition = conditioner.get_learned_condition(n_threads, params);
-        if (!condition.empty()) {
+        if (validate_moss_ && !valid_condition(condition)) {
+            invalid_moss_encoding_ = true;
+            LOG_ERROR("INVALID_MOSS_TEXT_ENCODING: text encoder returned empty, all-zero, or non-finite embeddings");
+            return {};
+        }
+        if (capacity_ != 0 && !condition.empty()) {
             if (entries_.size() == capacity_) {
                 remove_persisted(entries_.back());
                 entries_.pop_back();

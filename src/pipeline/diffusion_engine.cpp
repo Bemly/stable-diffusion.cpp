@@ -119,7 +119,9 @@ static void append_conditioning_cache_file_scope(std::ostringstream& scope, cons
 
 static std::string conditioning_cache_scope(const sd_ctx_params_t& params) {
     std::ostringstream scope;
-    scope << sd_commit() << ';' << sd_type_name(params.wtype) << ';'
+    // Keep a32089c's compatible embeddings across unrelated engine builds.
+    // Bump this identifier whenever conditioning semantics change.
+    scope << "a32089c" << ';' << sd_type_name(params.wtype) << ';'
           << SAFE_STR(params.tensor_type_rules) << ';' << SAFE_STR(params.model_args) << ';'
           << std::setprecision(9) << params.linear_scale << ';' << params.attn_scale << ';';
     for (const char* path : {
@@ -360,6 +362,7 @@ bool StableDiffusionGGML::apply_model_update(ModelLoader candidate,
     if (next_config) {
         config_ = std::move(next_config);
     }
+    conditioning_cache_->set_moss_validation(next_version == VERSION_MOSS_IMAGE);
     conditioning_cache_model_scope_ = conditioning_cache_scope(config_->params);
     configure_conditioning_cache_for_loras({});
     version = next_version;
@@ -1089,6 +1092,7 @@ bool StableDiffusionGGML::init(const sd_ctx_params_t* sd_ctx_params) {
     } else {
         LOG_INFO("Version: %s ", sd_version_name(version));
     }
+    conditioning_cache_->set_moss_validation(version == VERSION_MOSS_IMAGE);
 
     if (auto_fit_enabled) {
         if (!sd::backend_fit::derive_backend_specs(model_loader,
@@ -2018,7 +2022,11 @@ SDCondition StableDiffusionGGML::get_learned_condition(const ConditionerParams& 
     } else {
         LOG_INFO("conditioning cache miss");
     }
-    return conditioning_cache_->get(*cond_stage_model, n_threads, params);
+    auto condition = conditioning_cache_->get(*cond_stage_model, n_threads, params);
+    if (conditioning_cache_->invalid_moss_encoding()) {
+        generation_progress.report("error", "INVALID_MOSS_TEXT_ENCODING");
+    }
+    return condition;
 }
 
 void StableDiffusionGGML::reset_generation_extensions() {

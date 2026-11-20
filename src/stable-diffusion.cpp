@@ -794,6 +794,17 @@ SD_API char* sd_conditioning_cache_to_json(const sd_ctx_t* sd_ctx) {
     std::ostringstream oss;
     oss << "{\"capacity\":" << cache->capacity()
         << ",\"size\":" << cache->size()
+        << ",\"text_encoder\":\"" << json_escape(SAFE_STR(sd_ctx->sd->config_->params.llm_path)) << "\""
+        << ",\"diffusion_model\":\"" << json_escape(SAFE_STR(sd_ctx->sd->config_->params.diffusion_model_path)) << "\""
+        << ",\"tokenizer\":\"" << json_escape(SAFE_STR(sd_ctx->sd->config_->params.tokenizer)) << "\""
+        << ",\"loras\":[";
+    for (size_t i = 0; i < sd_ctx->sd->conditioning_loras_.size(); ++i) {
+        const auto& lora = sd_ctx->sd->conditioning_loras_[i];
+        if (i) oss << ',';
+        oss << "{\"path\":\"" << json_escape(lora.path)
+            << "\",\"strength\":" << lora.multiplier << '}';
+    }
+    oss << "]"
         << ",\"entries\":[";
     for (size_t i = 0; i < entries.size(); ++i) {
         const auto& e = entries[i];
@@ -805,6 +816,7 @@ SD_API char* sd_conditioning_cache_to_json(const sd_ctx_t* sd_ctx) {
             << ",\"width\":" << e.width
             << ",\"height\":" << e.height
             << ",\"clip_skip\":" << e.clip_skip
+            << ",\"zero_out_masked\":" << (e.zero_out_masked ? "true" : "false")
             << ",\"created_at\":" << e.created_at_unix
             << ",\"age_seconds\":" << e.age_seconds
             << '}';

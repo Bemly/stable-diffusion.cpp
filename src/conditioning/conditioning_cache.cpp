@@ -505,6 +505,10 @@ void ConditioningCache::load_existing() {
             ec.clear();
             continue;
         }
+        if (!valid_condition(saved.condition)) {
+            LOG_WARN("conditioning cache: ignoring invalid MOSS text encoding '%s'", saved.id.c_str());
+            continue;
+        }
         const bool duplicate = std::any_of(entries_.begin(), entries_.end(), [&](const Entry& entry) {
             return entry.id == saved.id;
         });
@@ -524,6 +528,10 @@ bool ConditioningCache::load_for_params(const ConditionerParams& params) {
     PersistedEntry saved;
     const auto path = file_for_id(id);
     if (!read_entry(path, saved) || !same_params(saved.params, params)) {
+        return false;
+    }
+    if (!valid_condition(saved.condition)) {
+        LOG_WARN("conditioning cache: ignoring invalid MOSS text encoding '%s'", saved.id.c_str());
         return false;
     }
     if (entries_.size() == capacity_) {
