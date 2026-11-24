@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -244,6 +245,57 @@ int main() {
             purged.set_capacity(2);
             purged.configure_persistence(temp.path.string(), "lru model scope");
             require(purged.size() == 0, "purge should delete entries from disk");
+        }
+
+        {
+            TemporaryDirectory prompt_temp;
+            const std::string scope = "prompt image scope";
+            sd::PromptInput input_a = {
+                {sd::PromptPart::Type::TEXT, params.text},
+                {sd::PromptPart::Type::IMAGE, "image-a", std::make_shared<const sd::Tensor<float>>(sd::Tensor<float>({1, 1, 1, 1}, {0.25f}))},
+            };
+            sd::PromptInput input_b       = input_a;
+            input_b[1].image              = std::make_shared<const sd::Tensor<float>>(sd::Tensor<float>({1, 1, 1, 1}, {0.75f}));
+            auto image_params             = params;
+            image_params.prompt_input     = &input_a;
+            const int calls_before_images = conditioner.calls;
+
+            {
+                ConditioningCache cache;
+                cache.set_capacity(4);
+                cache.configure_persistence(prompt_temp.path.string(), scope);
+                const auto first = cache.get(conditioner, 1, image_params);
+                require(conditioner.calls == calls_before_images + 1, "first prompt image should encode once");
+                cache.get(conditioner, 1, image_params);
+                require(conditioner.calls == calls_before_images + 1, "prompt image should hit in memory");
+
+                conditioner.output        = {7.f, 8.f, 9.f, 10.f, 11.f, 12.f};
+                image_params.prompt_input = &input_b;
+                const auto second         = cache.get(conditioner, 1, image_params);
+                require(conditioner.calls == calls_before_images + 2, "different prompt image should encode separately");
+                require(first.c_crossattn.values() != second.c_crossattn.values(), "different images must not collide in memory");
+                cache.get(conditioner, 1, image_params);
+                require(conditioner.calls == calls_before_images + 2, "second prompt image should hit in memory");
+                require(cache.size() == 2, "prompt images should remain cached in memory");
+                cache.record_role(image_params, 1);
+                require(std::filesystem::is_empty(prompt_temp.path / cache.storage_scope_id()),
+                        "prompt images must not write cache or role files");
+            }
+
+            ConditioningCache restored;
+            restored.set_capacity(4);
+            restored.configure_persistence(prompt_temp.path.string(), scope);
+            require(restored.size() == 0, "prompt images must not be restored from disk");
+            require(!restored.contains(params), "text-only params must not hit a persisted prompt image");
+            image_params.prompt_input = &input_a;
+            require(!restored.contains(image_params), "first prompt image must miss after reload");
+            image_params.prompt_input = &input_b;
+            require(!restored.contains(image_params), "second prompt image must miss after reload");
+
+            conditioner.output   = {13.f, 14.f, 15.f, 16.f, 17.f, 18.f};
+            const auto text_only = restored.get(conditioner, 1, params);
+            require(conditioner.calls == calls_before_images + 3, "text-only request must encode after prompt image reload");
+            require(text_only.c_crossattn.values() == conditioner.output, "text-only request must not reuse image conditioning");
         }
 
         return 0;

@@ -312,7 +312,7 @@ bool read_created_at(const std::filesystem::path& path, int64_t& created_at) {
 }
 
 bool persistable(const ConditionerParams& params, const SDCondition& condition) {
-    return params.ref_images == nullptr && params.minimax_h3_references == nullptr &&
+    return params.prompt_input == nullptr && params.ref_images == nullptr && params.minimax_h3_references == nullptr &&
            condition.c_image_embeds.empty() && condition.c_ref_images.empty() &&
            condition.c_ref_audios.empty() && condition.c_reference_blocks.empty();
 }
