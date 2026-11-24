@@ -94,34 +94,6 @@ namespace sd::pipeline {
         ImageVaeAxesGuard& operator=(const ImageVaeAxesGuard&) = delete;
     };
 
-    sd::Tensor<float> ensure_image_tensor_channels(sd::Tensor<float> image, int channels) {
-        if (image.empty()) {
-            return image;
-        }
-        GGML_ASSERT(image.dim() == 4);
-        int64_t current_channels = image.shape()[2];
-        if (current_channels == channels) {
-            return image;
-        }
-        if (channels == 4) {
-            sd::Tensor<float> alpha = sd::full<float>({image.shape()[0], image.shape()[1], 1, image.shape()[3]}, 1.f);
-            if (current_channels == 3) {
-                return sd::ops::concat(image, alpha, 2);
-            }
-            if (current_channels == 1) {
-                sd::Tensor<float> rgb = sd::ops::concat(image, image, 2);
-                rgb                   = sd::ops::concat(rgb, image, 2);
-                return sd::ops::concat(rgb, alpha, 2);
-            }
-        }
-        if (channels == 3 && current_channels >= 3) {
-            return sd::ops::slice(image, 2, 0, 3);
-        }
-        GGML_ABORT("cannot convert image tensor from %lld to %d channels",
-                   (long long)current_channels,
-                   channels);
-    }
-
     static sd::Tensor<float> encode_z_image_control_latent(StableDiffusionGGML* sd, const sd::Tensor<float>& control_rgb) {
         sd::Tensor<float> vae_output = sd->first_stage_model->encode(sd->n_threads,
                                                                      control_rgb,

@@ -1069,6 +1069,8 @@ static std::string convert_diffusers_dit_to_original_pixart(std::string name) {
 }
 
 static std::string convert_moss_image_dit_name(std::string name) {
+    if (starts_with(name, "transformer.layers."))
+        name.erase(0, sizeof("transformer.") - 1);
     static const std::vector<std::pair<std::string, std::string>> name_map = {
         {".proj.q.weight", ".proj.qkv.weight"},
         {".proj.k.weight", ".proj.qkv.weight.1"},
@@ -1800,7 +1802,10 @@ std::string convert_tensor_name(std::string name, SDVersion version) {
         }
     }
 
-    if (version == VERSION_FIBO2 || version == VERSION_QWEN_IMAGE_2_1 || sd_version_is_boogu_image(version) || sd_version_is_krea2(version) || sd_version_is_mage_flow(version) || sd_version_is_minimax_h3(version)) {
+    if (version == VERSION_FIBO2 || version == VERSION_QWEN_IMAGE_2_1 || version == VERSION_MOSS_IMAGE ||
+        version == VERSION_IRIS || sd_version_is_flux3(version) || sd_version_is_lingbot_video(version) ||
+        sd_version_is_ideogram4(version) || sd_version_is_sefi_image(version) || sd_version_is_boogu_image(version) ||
+        sd_version_is_krea2(version) || sd_version_is_mage_flow(version) || sd_version_is_minimax_h3(version)) {
         const std::string hf_vision_prefix = "text_encoders.llm.model.visual.";
         if (starts_with(name, hf_vision_prefix)) {
             name = "text_encoders.llm.visual." + name.substr(hf_vision_prefix.size());
@@ -1825,7 +1830,8 @@ std::string convert_tensor_name(std::string name, SDVersion version) {
             if (starts_with(name, "down_blocks.") || starts_with(name, "up_blocks.") ||
                 starts_with(name, "mid_block.") || starts_with(name, "conv_in.") ||
                 starts_with(name, "conv_out.") || starts_with(name, "time_embedding.") ||
-                starts_with(name, "conv_norm_out.")) {
+                starts_with(name, "conv_norm_out.") ||
+                (version == VERSION_MOSS_IMAGE && starts_with(name, "layers."))) {
                 const std::string& canonical_prefix = diffuison_model_prefix_vec.front();
                 name                                = convert_diffusion_model_name(name, canonical_prefix, version);
                 name                                = canonical_prefix + name;

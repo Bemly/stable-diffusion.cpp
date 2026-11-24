@@ -31,6 +31,7 @@ class ConditioningCache {
     struct Entry {
         ConditionerParams params;
         std::vector<sd::Tensor<float>> ref_images;
+        sd::PromptInput prompt_input;
         std::vector<MiniMaxH3PresentationItem> references;
         SDCondition condition;
         std::chrono::system_clock::time_point created_at;
@@ -41,6 +42,10 @@ class ConditioningCache {
               std::chrono::system_clock::time_point created = std::chrono::system_clock::now())
             : params(input), condition(output), created_at(created),
               id(std::move(entry_id)) {
+            if (input.prompt_input != nullptr) {
+                prompt_input        = *input.prompt_input;
+                params.prompt_input = &prompt_input;
+            }
             // Request-owned reference pointers must not outlive the request.
             if (input.ref_images != nullptr) {
                 ref_images        = *input.ref_images;
@@ -97,8 +102,19 @@ class ConditioningCache {
                             r.vlm_use_vae_input, r.ref_image_size);
         };
         if (fields(a) != fields(b) ||
+            (a.prompt_input == nullptr) != (b.prompt_input == nullptr) ||
             (a.ref_images == nullptr) != (b.ref_images == nullptr) ||
             (a.minimax_h3_references == nullptr) != (b.minimax_h3_references == nullptr)) {
+            return false;
+        }
+        if (a.prompt_input != nullptr &&
+            !std::equal(a.prompt_input->begin(), a.prompt_input->end(),
+                        b.prompt_input->begin(), b.prompt_input->end(),
+                        [](const sd::PromptPart& x, const sd::PromptPart& y) {
+                            return x.type == y.type && x.content == y.content && x.weight == y.weight &&
+                                   (x.image == y.image ||
+                                    (x.image && y.image && x.image->shape() == y.image->shape() && x.image->values() == y.image->values()));
+                        })) {
             return false;
         }
         if (a.ref_images != nullptr && !same_images(*a.ref_images, *b.ref_images)) {

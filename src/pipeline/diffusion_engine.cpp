@@ -2011,10 +2011,43 @@ SDCondition StableDiffusionGGML::get_learned_condition(const ConditionerParams& 
         LOG_ERROR("text encoder is not available");
         return {};
     }
+    auto resolved = params;
+    if (params.prompt_input == nullptr) {
+        auto input = sd::parse_prompt_input(params.text);
+        if (sd::prompt_has_images(input)) {
+            if (!cond_stage_model->supports_prompt_images()) {
+                LOG_ERROR("Inline prompt images require a compatible LLM and vision weights");
+                return {};
+            }
+            if (prompt_image_callback == nullptr) {
+                LOG_ERROR("Inline prompt images require sd_set_prompt_image_callback()");
+                return {};
+            }
+            if (!sd::resolve_prompt_images(input, [&](const std::string& source) -> sd::Tensor<float> {
+                    sd_image_t image{};
+                    if (!prompt_image_callback(source.c_str(), prompt_image_callback_data, &image) ||
+                        image.data == nullptr || image.width == 0 || image.height == 0 || image.channel < 1 || image.channel > 4) {
+                        LOG_ERROR("Failed to resolve prompt image: %s", source.c_str());
+                        return {};
+                    }
+                    auto pixels = sd_image_to_tensor(image);
+                    if (image.channel <= 2) {
+                        auto gray = sd::ops::slice(pixels, 2, 0, 1);
+                        return sd::ops::concat(sd::ops::concat(gray, gray, 2), gray, 2);
+                    }
+                    return image.channel == 3 ? pixels : sd::ops::slice(pixels, 2, 0, 3);
+                })) {
+                return {};
+            }
+            resolved.prompt_input = &input;
+        } else {
+            resolved.text = sd::prompt_input_text(input);
+        }
+    }
     // A hit returns the stored embeddings and must not touch encoder weights.
-    if (conditioning_cache_->contains(params)) {
-        auto condition = conditioning_cache_->get(*cond_stage_model, n_threads, params);
-        conditioning_cache_->record_role(params, role);
+    if (conditioning_cache_->contains(resolved)) {
+        auto condition = conditioning_cache_->get(*cond_stage_model, n_threads, resolved);
+        conditioning_cache_->record_role(resolved, role);
         return condition;
     }
     if (conditioner_weights_released_) {
@@ -2024,8 +2057,8 @@ SDCondition StableDiffusionGGML::get_learned_condition(const ConditionerParams& 
     } else {
         LOG_INFO("conditioning cache miss");
     }
-    auto condition = conditioning_cache_->get(*cond_stage_model, n_threads, params);
-    if (!condition.empty()) conditioning_cache_->record_role(params, role);
+    auto condition = conditioning_cache_->get(*cond_stage_model, n_threads, resolved);
+    if (!condition.empty()) conditioning_cache_->record_role(resolved, role);
     if (conditioning_cache_->invalid_moss_encoding()) {
         generation_progress.report("error", "INVALID_MOSS_TEXT_ENCODING");
     }
@@ -2669,8 +2702,8 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
             noised_input = noised_input * denoise_mask + sampling_init_latent * (1.0f - denoise_mask);
         }
 
-        if (cache_runtime.spectrum_enabled && cache_runtime.spectrum.should_predict()) {
-            cache_runtime.spectrum.predict(&denoised);
+        if (cache_runtime.spectrum_enabled && cache_runtime.spectrum.should_predict(step)) {
+            cache_runtime.spectrum.predict(&denoised, step);
             if (apply_denoise_mask) {
                 denoised = denoised * denoise_mask + sampling_init_latent * (1.0f - denoise_mask);
             }
@@ -3043,7 +3076,7 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
             output.pred_uncond                   = base_uncond * c_out + x * c_skip;
         }
         if (cache_runtime.spectrum_enabled) {
-            cache_runtime.spectrum.update(denoised);
+            cache_runtime.spectrum.update(denoised, step);
         }
         if (apply_denoise_mask) {
             denoised = denoised * denoise_mask + sampling_init_latent * (1.0f - denoise_mask);

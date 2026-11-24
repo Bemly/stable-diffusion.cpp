@@ -130,6 +130,11 @@ cmake .. -DSD_CUDA=ON
 cmake --build . --config Release
 ```
 
+When building GGML from source, sd.cpp's CUDA extensions use the same target
+architectures as GGML, including native GPU detection with `GGML_NATIVE=ON`.
+To select target GPUs explicitly, pass `-DCMAKE_CUDA_ARCHITECTURES=89` (Ada),
+for example, or a quoted list such as `-DCMAKE_CUDA_ARCHITECTURES="80;89"`.
+
 CUDA extensions use sd.cpp's `thirdparty/cutlass` submodule by default
 for eligible INT8 GEMM and CuTe attention operations. If its headers are missing,
 CMake stops with an initialization hint; it does not download them automatically.
@@ -157,7 +162,23 @@ takes precedence. Non-CUDA builds do not require CUTLASS.
 This provides GPU acceleration using AMD GPU. Make sure to have the ROCm toolkit installed.
 To build for another GPU architecture than installed in your system, set `$GFX_NAME` manually to the desired architecture (replace first command). This is also necessary if your GPU is not officially supported by ROCm, for example you have to set `$GFX_NAME` manually to `gfx1030` for consumer RDNA2 cards.
 
-Windows User Refer to [docs/hipBLAS_on_Windows.md](docs%2FhipBLAS_on_Windows.md) for a comprehensive guide.
+When the hipBLASLt development package (version 1.0 or later) is available,
+CMake also enables INT8 GEMM tuning. The first run of an eligible matrix shape
+benchmarks the no-workspace candidates returned by hipBLASLt for the current
+device, including CDNA devices, and caches the result in the process. It
+selects a hipBLASLt candidate that runs successfully and beats hipBLAS, or a
+working candidate if hipBLAS does not support the operation.
+Set `SD_HIP_DISABLE_I8_LT=1` to use the hipBLAS GEMM path for comparison.
+
+With a compiled wave32 WMMA kernel, the HIP flash attention path supports
+head dimensions 40, 52, 64, 72, 80, 120, 128, 160, 256, and 320, including
+grouped-query attention. It requires unmasked attention with at least 512
+query tokens and 512 key tokens. Set `SD_HIP_DISABLE_WMMA_ATTN=1` to use
+ggml's native attention path for comparison.
+
+**Linux**
+
+With ROCm installed, use the default CMake generator and host compilers:
 
 ```shell
 mkdir build && cd build

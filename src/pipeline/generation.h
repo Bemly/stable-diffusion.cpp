@@ -71,8 +71,6 @@ namespace sd::pipeline {
                                                        const sd::Tensor<float>& packed_latent,
                                                        int audio_length);
 
-    sd::Tensor<float> ensure_image_tensor_channels(sd::Tensor<float> image, int channels);
-
 }  // namespace sd::pipeline
 
 #endif  // __SD_PIPELINE_GENERATION_H__
