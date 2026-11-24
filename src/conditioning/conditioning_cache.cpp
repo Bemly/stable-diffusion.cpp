@@ -408,6 +408,39 @@ std::filesystem::path ConditioningCache::file_for_id(const std::string& id) cons
     return storage_dir_ / (id + ".cndcache");
 }
 
+std::filesystem::path ConditioningCache::role_file_for_id(const std::string& id) const {
+    return storage_dir_ / (id + ".roles");
+}
+
+void ConditioningCache::record_role(const ConditionerParams& params, int role) {
+    if (role != 1 && role != 2) return;
+    auto it = std::find_if(entries_.begin(), entries_.end(), [&](const Entry& entry) {
+        return same_params(entry.params, params);
+    });
+    if (it == entries_.end() || !it->persisted || storage_dir_.empty()) return;
+    const auto path = role_file_for_id(it->id);
+    int roles = 0;
+    {
+        std::ifstream input(path);
+        if (input) input >> roles;
+    }
+    if ((roles & role) != 0) return;
+    roles |= role;
+    const auto temporary = path.string() + ".tmp";
+    {
+        std::ofstream output(temporary, std::ios::trunc);
+        output << roles;
+        output.close();
+        if (!output) {
+            LOG_WARN("conditioning cache: failed to write prompt roles for '%s'", it->id.c_str());
+            return;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) LOG_WARN("conditioning cache: failed to save prompt roles for '%s': %s", it->id.c_str(), ec.message().c_str());
+}
+
 void ConditioningCache::configure_persistence(const std::string& directory, const std::string& scope) {
     clear_memory();
     storage_dir_.clear();
@@ -495,6 +528,8 @@ void ConditioningCache::load_existing() {
             for (; i < files.size(); ++i) {
                 std::filesystem::remove(files[i].path, ec);
                 ec.clear();
+                std::filesystem::remove(files[i].path.parent_path() / (files[i].path.stem().string() + ".roles"), ec);
+                ec.clear();
             }
             break;
         }
@@ -502,6 +537,8 @@ void ConditioningCache::load_existing() {
         if (!read_entry(file.path, saved)) {
             LOG_WARN("conditioning cache: ignoring invalid persisted entry '%s'", file.path.string().c_str());
             std::filesystem::remove(file.path, ec);
+            ec.clear();
+            std::filesystem::remove(file.path.parent_path() / (file.path.stem().string() + ".roles"), ec);
             ec.clear();
             continue;
         }
@@ -616,6 +653,9 @@ void ConditioningCache::remove_persisted(const Entry& entry) {
         LOG_WARN("conditioning cache: failed to remove entry '%s': %s",
                  entry.id.c_str(), ec.message().c_str());
     }
+    ec.clear();
+    std::filesystem::remove(role_file_for_id(entry.id), ec);
+    if (ec) LOG_WARN("conditioning cache: failed to remove prompt roles for '%s': %s", entry.id.c_str(), ec.message().c_str());
 }
 
 void ConditioningCache::touch_persisted(const Entry& entry) {
@@ -659,6 +699,8 @@ size_t ConditioningCache::purge_older_than(std::chrono::seconds max_age) {
         const auto created = std::chrono::system_clock::time_point(std::chrono::seconds(created_at));
         if (created < cutoff) {
             std::filesystem::remove(it->path(), ec);
+            ec.clear();
+            std::filesystem::remove(it->path().parent_path() / (it->path().stem().string() + ".roles"), ec);
             ec.clear();
             ++removed;
         }

@@ -112,6 +112,13 @@ int main() {
                     "fresh conditioning mismatch");
             cache.get(conditioner, 1, params);
             require(conditioner.calls == 1, "same conditioning params should not encode twice");
+            cache.record_role(params, 1);
+            cache.record_role(params, 2);
+            const auto id = cache.list().front().id;
+            std::ifstream roles(temp.path / cache.storage_scope_id() / (id + ".roles"));
+            int value = 0;
+            roles >> value;
+            require(value == 3, "positive and negative roles should both be persisted");
         }
 
         std::filesystem::path cache_dir;
@@ -142,6 +149,9 @@ int main() {
 
             restored.clear();
             require(restored.size() == 0, "clear should empty memory");
+            for (const auto& item : std::filesystem::directory_iterator(cache_dir)) {
+                require(item.path().extension() != ".roles", "clear should delete prompt role metadata");
+            }
         }
 
         {

@@ -794,6 +794,7 @@ SD_API char* sd_conditioning_cache_to_json(const sd_ctx_t* sd_ctx) {
     std::ostringstream oss;
     oss << "{\"capacity\":" << cache->capacity()
         << ",\"size\":" << cache->size()
+        << ",\"storage_scope_id\":\"" << json_escape(cache->storage_scope_id()) << "\""
         << ",\"text_encoder\":\"" << json_escape(SAFE_STR(sd_ctx->sd->config_->params.llm_path)) << "\""
         << ",\"diffusion_model\":\"" << json_escape(SAFE_STR(sd_ctx->sd->config_->params.diffusion_model_path)) << "\""
         << ",\"tokenizer\":\"" << json_escape(SAFE_STR(sd_ctx->sd->config_->params.tokenizer)) << "\""

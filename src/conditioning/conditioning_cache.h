@@ -122,6 +122,7 @@ class ConditioningCache {
     }
 
     std::filesystem::path file_for_id(const std::string& id) const;
+    std::filesystem::path role_file_for_id(const std::string& id) const;
     bool read_entry(const std::filesystem::path& path, PersistedEntry& out) const;
     bool load_for_params(const ConditionerParams& params);
     void load_existing();
@@ -155,6 +156,7 @@ public:
     void configure_persistence(const std::string& directory, const std::string& scope);
     size_t capacity() const { return capacity_; }
     size_t size() const { return entries_.size(); }
+    std::string storage_scope_id() const { return storage_dir_.filename().string(); }
     bool invalid_moss_encoding() const { return invalid_moss_encoding_; }
 
     void clear() {
@@ -168,7 +170,7 @@ public:
                 if (ec) {
                     break;
                 }
-                if (item.path().extension() == ".cndcache" || item.path().extension() == ".tmp") {
+                if (item.path().extension() == ".cndcache" || item.path().extension() == ".tmp" || item.path().extension() == ".roles") {
                     std::filesystem::remove(item.path(), ec);
                     ec.clear();
                 }
@@ -192,6 +194,7 @@ public:
     }
 
     size_t purge_older_than(std::chrono::seconds max_age);
+    void record_role(const ConditionerParams& params, int role);
 
     std::vector<ConditioningCacheEntryInfo> list() const {
         std::vector<ConditioningCacheEntryInfo> out;

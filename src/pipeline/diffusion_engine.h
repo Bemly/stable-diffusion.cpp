@@ -402,7 +402,7 @@ public:
 
     bool apply_loras(const sd_lora_t* loras, uint32_t lora_count);
 
-    SDCondition get_learned_condition(const ConditionerParams& params);
+    SDCondition get_learned_condition(const ConditionerParams& params, int role = 0);
 
     void reset_generation_extensions();
 

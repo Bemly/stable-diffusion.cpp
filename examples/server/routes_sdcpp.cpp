@@ -542,6 +542,104 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
         res.set_content(body, "application/json");
     });
 
+    routes.del("/sdcpp/v1/conditioning-cache/disk", [runtime](const httplib::Request& req, httplib::Response& res) {
+        std::lock_guard<std::mutex> lock(*runtime->sd_ctx_mutex);
+        const auto valid_hash = [](const std::string& value) {
+            return value.size() == 16 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            });
+        };
+        const bool all = req.has_param("all") && req.get_param_value("all") == "true";
+        const std::string scope = req.has_param("scope") ? req.get_param_value("scope") : "";
+        const std::string id = req.has_param("id") ? req.get_param_value("id") : "";
+        if ((!all && (!valid_hash(scope) || !valid_hash(id))) ||
+            (all && (!scope.empty() || !id.empty()))) {
+            res.status = 400;
+            res.set_content(R"({"error":"Invalid cache scope or entry id"})", "application/json");
+            return;
+        }
+        if (runtime->ctx_params->conditioning_cache_dir.empty()) {
+            res.status = 503;
+            res.set_content(R"({"error":"Conditioning cache directory is not configured"})", "application/json");
+            return;
+        }
+        std::string active_scope;
+        if (runtime->sd_ctx != nullptr) {
+            char* snapshot = sd_conditioning_cache_to_json(runtime->sd_ctx);
+            if (snapshot == nullptr) {
+                res.status = 500;
+                res.set_content(R"({"error":"Failed to read active cache"})", "application/json");
+                return;
+            }
+            auto parsed = json::parse(snapshot, nullptr, false);
+            free(snapshot);
+            if (parsed.is_discarded() || !parsed.contains("storage_scope_id")) {
+                res.status = 500;
+                res.set_content(R"({"error":"Failed to identify active cache scope"})", "application/json");
+                return;
+            }
+            active_scope = parsed.value("storage_scope_id", "");
+        }
+        const std::filesystem::path root(runtime->ctx_params->conditioning_cache_dir);
+        std::error_code ec;
+        if (!all) {
+            const auto folder = root / scope;
+            const auto folder_status = std::filesystem::symlink_status(folder, ec);
+            if (ec || !std::filesystem::is_directory(folder_status)) {
+                res.status = 404;
+                res.set_content(R"({"error":"Cache scope not found"})", "application/json");
+                return;
+            }
+            if (runtime->sd_ctx != nullptr && scope == active_scope) {
+                sd_conditioning_cache_erase(runtime->sd_ctx, id.c_str());
+                runtime->update_conditioning_snapshot(runtime->sd_ctx);
+            }
+            const auto target = folder / (id + ".cndcache");
+            std::filesystem::remove(target, ec);
+            if (ec) {
+                res.status = 500;
+                res.set_content(json({{"error", ec.message()}}).dump(), "application/json");
+                return;
+            }
+            std::filesystem::remove(folder / (id + ".roles"), ec);
+            if (ec) {
+                res.status = 500;
+                res.set_content(json({{"error", ec.message()}}).dump(), "application/json");
+                return;
+            }
+        } else {
+            if (runtime->sd_ctx != nullptr) {
+                sd_conditioning_cache_clear(runtime->sd_ctx);
+                runtime->update_conditioning_snapshot(runtime->sd_ctx);
+            }
+            std::filesystem::directory_iterator folders(root, ec), end;
+            if (ec && ec != std::errc::no_such_file_or_directory) {
+                res.status = 500;
+                res.set_content(json({{"error", ec.message()}}).dump(), "application/json");
+                return;
+            }
+            if (ec == std::errc::no_such_file_or_directory) ec.clear();
+            for (; !ec && folders != end; folders.increment(ec)) {
+                auto status = folders->symlink_status(ec);
+                if (ec) break;
+                if (!std::filesystem::is_directory(status) || !valid_hash(folders->path().filename().string())) continue;
+                std::filesystem::directory_iterator files(folders->path(), ec);
+                for (; !ec && files != end; files.increment(ec)) {
+                    if (files->path().extension() == ".cndcache" || files->path().extension() == ".roles") {
+                        std::filesystem::remove(files->path(), ec);
+                    }
+                }
+            }
+            if (ec) {
+                res.status = 500;
+                res.set_content(json({{"error", ec.message()}}).dump(), "application/json");
+                return;
+            }
+        }
+        res.status = 200;
+        res.set_content(R"({"ok":true})", "application/json");
+    });
+
     routes.del("/sdcpp/v1/conditioning-cache", [runtime](const httplib::Request& req, httplib::Response& res) {
         std::lock_guard<std::mutex> lock(*runtime->sd_ctx_mutex);
         if (runtime->sd_ctx == nullptr) {

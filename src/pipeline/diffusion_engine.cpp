@@ -2006,14 +2006,16 @@ bool StableDiffusionGGML::apply_loras(const sd_lora_t* loras, uint32_t lora_coun
     return true;
 }
 
-SDCondition StableDiffusionGGML::get_learned_condition(const ConditionerParams& params) {
+SDCondition StableDiffusionGGML::get_learned_condition(const ConditionerParams& params, int role) {
     if (cond_stage_model == nullptr) {
         LOG_ERROR("text encoder is not available");
         return {};
     }
     // A hit returns the stored embeddings and must not touch encoder weights.
     if (conditioning_cache_->contains(params)) {
-        return conditioning_cache_->get(*cond_stage_model, n_threads, params);
+        auto condition = conditioning_cache_->get(*cond_stage_model, n_threads, params);
+        conditioning_cache_->record_role(params, role);
+        return condition;
     }
     if (conditioner_weights_released_) {
         // prepare_params reloads whatever release_conditioner_weights dropped.
@@ -2023,6 +2025,7 @@ SDCondition StableDiffusionGGML::get_learned_condition(const ConditionerParams& 
         LOG_INFO("conditioning cache miss");
     }
     auto condition = conditioning_cache_->get(*cond_stage_model, n_threads, params);
+    if (!condition.empty()) conditioning_cache_->record_role(params, role);
     if (conditioning_cache_->invalid_moss_encoding()) {
         generation_progress.report("error", "INVALID_MOSS_TEXT_ENCODING");
     }

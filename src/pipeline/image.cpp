@@ -572,7 +572,7 @@ namespace sd::pipeline {
         int64_t prepare_start_ms         = ggml_time_ms();
         condition_params.zero_out_masked = false;
         sd->generation_progress.report("conditioning", "positive_prompt");
-        auto cond = sd->get_learned_condition(condition_params);
+        auto cond = sd->get_learned_condition(condition_params, 1);
         if (cond.empty()) {
             LOG_ERROR("failed to encode prompt");
             return std::nullopt;
@@ -619,7 +619,7 @@ namespace sd::pipeline {
                     condition_params.ref_images = nullptr;
                 }
                 sd->generation_progress.report("conditioning", "negative_prompt");
-                uncond = sd->get_learned_condition(condition_params);
+                uncond = sd->get_learned_condition(condition_params, 2);
                 if (uncond.empty()) {
                     LOG_ERROR("failed to encode negative prompt");
                     return std::nullopt;
@@ -651,7 +651,7 @@ namespace sd::pipeline {
                     condition_params.ref_images = &empty_ref_images;
                 }
                 sd->generation_progress.report("conditioning", "image_condition");
-                img_uncond = sd->get_learned_condition(condition_params);
+                img_uncond = sd->get_learned_condition(condition_params, 2);
                 if (img_uncond.empty()) {
                     LOG_ERROR("failed to encode image guidance prompt");
                     return std::nullopt;

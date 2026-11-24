@@ -1211,7 +1211,7 @@ namespace sd::pipeline {
 
         int64_t prepare_start_ms = ggml_time_ms();
         sd->generation_progress.report("conditioning", "positive_prompt");
-        embeds.cond = sd->get_learned_condition(condition_params);
+        embeds.cond = sd->get_learned_condition(condition_params, 1);
         if (embeds.cond.empty()) {
             LOG_ERROR("failed to encode video prompt");
             return std::nullopt;
@@ -1237,7 +1237,7 @@ namespace sd::pipeline {
         if (request.use_uncond) {
             condition_params.text = request.negative_prompt;
             sd->generation_progress.report("conditioning", "negative_prompt");
-            embeds.uncond = sd->get_learned_condition(condition_params);
+            embeds.uncond = sd->get_learned_condition(condition_params, 2);
             if (embeds.uncond.empty()) {
                 LOG_ERROR("failed to encode negative video prompt");
                 return std::nullopt;
